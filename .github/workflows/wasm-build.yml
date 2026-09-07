@@ -35,9 +35,12 @@ on:
         description: "Upload the publishable output/ subset as the 'wasm-output' artifact"
         type: boolean
         default: false
+      publish_release:
+        description: "Publish editor bytes immediately, before regression tests"
+        type: boolean
+        default: false
 
-permissions:
-  contents: read
+# Inherit the caller's token: ordinary CI is read-only; tag releases can publish.
 
 jobs:
   build:
@@ -272,6 +275,33 @@ jobs:
             !output/*.wasm.debug.wasm
           key: ${{ steps.keys.outputs.key }}
 
+      - name: Publish editor release before regression tests
+        if: inputs.publish_release && matrix.group == 'editor' && github.repository == 'diodeinc/pcbjam' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/diode-v'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/package_kicad_wasm.py output release
+          TAG="$GITHUB_REF_NAME"
+          OPTIONS=(--verify-tag)
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            TAG="diode-build-$GITHUB_SHA"
+            OPTIONS=(--target "$GITHUB_SHA" --prerelease --latest=false)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            mkdir existing
+            gh release download "$TAG" --dir existing
+            (cd existing && sha256sum -c SHA256SUMS)
+            cmp release/kicad-wasm.zip existing/kicad-wasm.zip
+            cmp release/BUILD-METADATA.txt existing/BUILD-METADATA.txt
+            cmp release/SOURCE-LICENSES.txt existing/SOURCE-LICENSES.txt
+            echo "Release already exists with identical bytes; nothing to overwrite."
+            exit 0
+          fi
+          gh release create "$TAG" release/* \
+            "${OPTIONS[@]}" --title "$TAG" \
+            --notes "Diode KiCad WASM browser runtime. Published after compilation; regression tests run afterward and may fail. Verify assets with SHA256SUMS; corresponding source is the tagged repository and pinned submodules recorded in BUILD-METADATA.txt."
+
       # Tar preserves sysroot symlinks/modes. Only the editor owns shared
       # runtime resources, so assembling shards never overwrites another's files.
       - name: Package build shard
@@ -307,6 +337,8 @@ jobs:
   test:
     name: Assemble and test all tools (Blacksmith)
     needs: build
+    permissions:
+      contents: read
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 180
     env:

@@ -37,8 +37,14 @@ KiCad suites require `BUILD_3D_VIEWER=ON` and do not skip safely with the stub,
 so the OFF workflow explicitly excludes those describes. This is the known
 unavailable regression coverage; CI does not claim 3D-viewer integration.
 
-Pushing a trusted `diode-v*` tag in `diodeinc/pcbjam` repeats the exact build and
-test recipe, then creates a GitHub Release with no external hosting secret. The
+Every push to `diodeinc/pcbjam`'s `main` publishes an immutable GitHub prerelease
+named `diode-build-<full commit SHA>` as soon as the editor build is ready.
+Registry can pin `https://github.com/diodeinc/pcbjam/releases/download/diode-build-<SHA>/kicad-wasm.zip`
+and verify it against the adjacent `SHA256SUMS`. Named `diode-v*` tags still
+publish regular releases. PRs never publish and retain read-only tokens.
+Publication does not wait for other build shards or regression tests, and
+later test failures do not retract the bytes. There is no promotion step.
+New commits can build while older commits finish their tests. The
 `kicad-wasm.zip` root contains exactly `wx.js`, `wx-dom.js`, `kicad_editor.js`,
 `kicad_editor.wasm`, and `images.tar.gz`. It is accompanied by `SHA256SUMS`,
 deterministic build metadata (root/submodule commits, toolchain, config), and
@@ -57,9 +63,8 @@ checkout authentication to be arranged before enabling these workflows.
    wxWidgets preserves both fork histories while adopting the tested WASM
    source tree. KiCad's native desktop branch remains unchanged.
 2. Publish the root integration directly to `diodeinc/pcbjam`'s `main`.
-   Run the Blacksmith build and browser tests before tagging.
-3. After that build is green, publish a `diode-v*` release tag. Verify the
-   downloaded release archive against its published `SHA256SUMS`.
+   Its editor build automatically publishes bytes; regression tests follow.
+3. Verify the downloaded commit release against its published `SHA256SUMS`.
 4. Update Registry's installer to pin that release URL and archive digest;
    only then retire the monorepo patch-bundle fallback.
 

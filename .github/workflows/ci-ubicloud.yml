@@ -1,23 +1,21 @@
 name: Diode CI (WASM build + e2e)
 
-# Main/PR gate: build all 6 KiCad WASM tools + run the wxWidgets + KiCad e2e
+# Main/PR pipeline: build KiCad WASM tools + run the wxWidgets + KiCad e2e
 # suites on a Blacksmith runner. The actual recipe lives in the reusable
 # wasm-build.yml (the SINGLE build definition) — this is just the main/PR caller.
 # The tag release (release.yml) calls the same recipe with the same inputs and
-# then publishes, so the build can never diverge from what ships.
+# publishes editor bytes before regression tests, using the same build recipe.
 #
 # Routine edits under scripts/ do NOT bust the WASM output cache — only the subset
 # in scripts/deploy/wasm-cache-hash.mjs does. For inputs the sc-hash can't see
 # (base-image / apt drift, a bad cache) bump .ci-cache-epoch; for a one-off
 # rebuild put [no-cache] or [rebuild-wasm] in the commit message / PR title.
 #
-# site/** is ignored: the upstream marketing site shares no build inputs with
-# the WASM tools and is not deployed by this fork.
+# PRs ignore documentation/site-only edits; every main push publishes a pin.
 
 on:
   push:
     branches: ["main"]
-    paths-ignore: ["docs/**", "**.md", "site/**"]
   pull_request:
     branches: ["main"]
     paths-ignore: ["docs/**", "**.md", "site/**"]
@@ -30,8 +28,8 @@ on:
         default: false
 
 concurrency:
-  # Per-ref: a new push queues behind its own in-flight run (don't cancel).
-  group: diode-ci-${{ github.ref }}
+  # New commits must not wait for an older commit's regression tests.
+  group: diode-ci-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -39,6 +37,18 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'diodeinc/pcbjam'
+    uses: ./.github/workflows/wasm-build.yml
+    permissions:
+      contents: write
+    with:
+      build_3d_viewer: "OFF"
+      run_tests: true
+      publish_release: true
+      no_cache: ${{ inputs.no_cache || false }}
+
+  check:
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
     uses: ./.github/workflows/wasm-build.yml
     permissions:
       contents: read

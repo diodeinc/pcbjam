@@ -5,7 +5,7 @@ on:
     tags: ["diode-v*"]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: diode-release-${{ github.ref }}
@@ -19,45 +19,4 @@ jobs:
       build_3d_viewer: "OFF"
       run_tests: true
       upload_output: true
-
-  package:
-    name: Package and publish GitHub Release
-    needs: build
-    if: github.repository == 'diodeinc/pcbjam'
-    runs-on: blacksmith-16vcpu-ubuntu-2404
-    permissions:
-      # gh release create uploads assets to this tagged repository release.
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: recursive
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          package-manager-cache: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: wasm-output
-          path: output
-      - name: Assemble immutable release assets
-        run: python3 scripts/release/package_kicad_wasm.py output release
-      - name: Refuse a release rerun with different bytes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            mkdir existing
-            gh release download "$GITHUB_REF_NAME" --dir existing
-            (cd existing && sha256sum -c SHA256SUMS)
-            cmp release/kicad-wasm.zip existing/kicad-wasm.zip
-            cmp release/BUILD-METADATA.txt existing/BUILD-METADATA.txt
-            cmp release/SOURCE-LICENSES.txt existing/SOURCE-LICENSES.txt
-            echo "Release already exists with identical bytes; nothing to overwrite."
-            exit 0
-          fi
-          gh release create "$GITHUB_REF_NAME" release/* \
-            --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "Diode KiCad WASM browser runtime. Verify assets with SHA256SUMS; corresponding source is the tagged repository and pinned submodules recorded in BUILD-METADATA.txt."
+      publish_release: true
