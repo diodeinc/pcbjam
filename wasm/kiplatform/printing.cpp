@@ -11,6 +11,11 @@ namespace KIPLATFORM
 namespace PRINTING
 {
 
+void ResetPrintToFilePath( wxPrintData& )
+{
+    // Browser printing has no native print-to-file path to reset.
+}
+
 PRINT_RESULT PrintPDF( const std::string& aFile )
 {
     // Direct printing is not supported in browser

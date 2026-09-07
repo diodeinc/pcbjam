@@ -191,6 +191,12 @@ void SetFloatLevel( wxWindow* aWindow )
     // No floating window levels in browser
 }
 
+bool IsNativeWindowInDisplayTransition( const wxWindow* )
+{
+    // Browser windows do not participate in native display transitions.
+    return false;
+}
+
 void AllowNetworkFileSystems( wxDialog* aDialog )
 {
     // Native platforms use this to let file dialogs browse network mounts.

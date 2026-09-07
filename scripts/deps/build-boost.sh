@@ -43,8 +43,8 @@ if [ ! -d "${BOOST_DIR}" ]; then
     mkdir -p "${DEPS_ROOT}"
     cd "${DEPS_ROOT}"
 
-    # Use SourceForge mirror (most reliable for Boost downloads)
-    BOOST_URL="https://sourceforge.net/projects/boost/files/boost/${BOOST_VERSION}/boost_${BOOST_VERSION_UNDERSCORE}.tar.gz/download"
+    # Official archive avoids SourceForge's variable mirror routing.
+    BOOST_URL="https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION_UNDERSCORE}.tar.gz"
     BOOST_ARCHIVE="boost_${BOOST_VERSION_UNDERSCORE}.tar.gz"
 
     # Download and extract

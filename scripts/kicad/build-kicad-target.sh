@@ -459,6 +459,11 @@ fi
 # KICAD_BUILD_3D_VIEWER_WASM stays OFF upstream; our build passes it explicitly.
 # See wasm/gl1/README.md and docs/features/fork-cleanup/10-3d-viewer.md.
 BUILD_3D_VIEWER="${BUILD_3D_VIEWER:-ON}"
+# The OCC service needs the real model loader, scene graph, and OCC linkage
+# supplied by the 3D library even when the interactive editor disables it.
+if [ "${APP_NAME}" = "occ_service" ]; then
+    BUILD_3D_VIEWER=ON
+fi
 GL3D_LINK_FLAGS=""
 if [ "${BUILD_3D_VIEWER}" = "ON" ]; then
     log_info "3D viewer ENABLED for WASM (BUILD_3D_VIEWER=ON) — compiling wasm/gl1 FFP shim"

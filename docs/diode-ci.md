@@ -12,7 +12,8 @@ cache, and artifact actions are commit-pinned. No workflow accesses PCBJam R2,
 Discord, Cloudflare, telemetry, demo, site, staging, or library publishing.
 Logs, Playwright results, and screenshots are retained as GitHub artifacts.
 
-Both CI and release build with `BUILD_3D_VIEWER=OFF`, at most 32 compiler jobs
+Both CI and release build the editor with `BUILD_3D_VIEWER=OFF`. The OCC
+service always enables its required real 3D/model libraries. Builds use at most 32 compiler jobs
 per runner, and a 110 GiB container limit. Cache key epoch `kwasm-v3` includes
 the shard, root build input hash, submodule commits, 3D setting, job bound,
 and `.ci-cache-epoch`. Browser suites use 16 workers; performance measurements
