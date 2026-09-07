@@ -4,7 +4,7 @@ name: wasm-build (reusable)
 # Both callers pass the validated 3D-off configuration, so CI and shipped bytes
 # cannot diverge.
 #
-# ONE output cache around docker/build.sh's --compile-only / --postprocess-only
+# Per-shard output caches around docker/build.sh's --compile-only / --postprocess-only
 # split. Under JSPI the wasm links fully finalized in-container; the only host
 # post-process left is the deterministic, seconds-cheap ENV merge shim
 # (patch-env-shim.mjs). So the cache holds the post-processed output/, keyed on
@@ -40,16 +40,28 @@ permissions:
   contents: read
 
 jobs:
-  build-and-test:
-    name: Build all tools + KiCad e2e (Blacksmith)
+  build:
+    name: Build ${{ matrix.group }} (Blacksmith)
     # Don't run untrusted fork PRs on the paid runner (push/dispatch always run;
     # same-repo PRs run). github.event_name here is the CALLER's event.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: editor
+            apps: kicad_editor
+          - group: tools
+            apps: kicad_tools,occ_service,ngspice_service
+          - group: utilities
+            apps: calculator,pl_editor,gerbview
     env:
       KICAD_LOG_NESTED: "1"
       BUILD_3D_VIEWER: ${{ inputs.build_3d_viewer }}
+      BUILD_APPS: ${{ matrix.apps }}
+      BUILD_GROUP: ${{ matrix.group }}
       # Stable docker-compose project → deterministic build-cache volume name.
       COMPOSE_PROJECT_NAME: kicad-wasm-ci
     steps:
@@ -91,7 +103,7 @@ jobs:
           SC=$(node scripts/deploy/wasm-cache-hash.mjs)
           EPOCH=$(cat .ci-cache-epoch 2>/dev/null || echo 0)
           EMV=$(. scripts/common/versions.sh && echo "$EMSCRIPTEN_VERSION")
-          KEY="kwasm-v2-${CACHE_RUNNER_OS}-k${KICAD}-wx${WX}-sc${SC}-3d${THREED}-j12-e${EPOCH}"
+          KEY="kwasm-v3-${BUILD_GROUP}-${CACHE_RUNNER_OS}-k${KICAD}-wx${WX}-sc${SC}-3d${THREED}-j32-e${EPOCH}"
           {
             echo "kicad=$KICAD"; echo "wx=$WX"; echo "sc=$SC"; echo "epoch=$EPOCH"
             echo "emv=$EMV"
@@ -153,18 +165,68 @@ jobs:
           docker run --rm -v kicad-wasm-ci_kicad-build-cache:/bw -v "$PWD/deps-cache":/cache \
             alpine sh -c 'tar xzf /cache/deps.tar.gz -C /bw'
 
+      # Unlike final output, compiler entries can be reused ACROSS source commits:
+      # ccache checks compiler/flags/headers/content itself. A unique immutable
+      # key per attempt saves new objects; the prefix restores the newest cache.
+      - name: Restore compiler cache
+        if: steps.wasm-cache.outputs.cache-hit != 'true' && steps.cachectl.outputs.skip != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build-wasm/ci-ccache/ccache.tar
+          key: ccache-v1-${{ matrix.group }}-${{ runner.os }}-${{ steps.keys.outputs.emv }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-v1-${{ matrix.group }}-${{ runner.os }}-${{ steps.keys.outputs.emv }}-
+
+      - name: Seed compiler cache volume
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: |
+          docker volume create kicad-wasm-ci_kicad-build-cache
+          if [ -f build-wasm/ci-ccache/ccache.tar ]; then
+            docker run --rm -v kicad-wasm-ci_kicad-build-cache:/bw \
+              -v "$PWD/build-wasm/ci-ccache":/cache:ro \
+              alpine sh -c 'tar xf /cache/ccache.tar -C /bw'
+          fi
+
       # PHASE 1 (cache miss only): container compile of all bundles → output/
       # wasm, fully finalized in-container (JSPI links with the real tools).
       # 3D viewer per input.
-      - name: Compile all KiCad tools (container)
+      - name: Compile shard (isolated container)
+        id: compile
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           # Bound parallel compiler/linker pressure: Emscripten links are memory-heavy.
-          JOBS=$(( $(nproc) < 12 ? $(nproc) : 12 ))
-          export KICAD_DOCKER_CPUS="$JOBS" KICAD_DOCKER_MEM=48G
-          echo "Compiling ALL tools, 3D viewer=${BUILD_3D_VIEWER}, -j $JOBS"
-          ./docker/build.sh all --compile-only --build-deps -j "$JOBS"
+          # 32-vCPU / 128-GB runner; leave memory headroom for Docker and the host.
+          JOBS=$(( $(nproc) < 32 ? $(nproc) : 32 ))
+          export KICAD_DOCKER_CPUS="$JOBS" KICAD_DOCKER_MEM=110G
+          echo "Compiling ${BUILD_APPS}, 3D viewer=${BUILD_3D_VIEWER}, -j $JOBS"
+          ./docker/build.sh "$BUILD_APPS" --compile-only --build-deps -j "$JOBS"
           ls -lh output/*.wasm
+
+      # Preserve completed object compilations even when a later compile/link
+      # fails. Never persist partial final WASM output as a successful build.
+      - name: Export compiler cache and statistics
+        id: compiler-cache
+        if: ${{ !cancelled() && (steps.compile.outcome == 'success' || steps.compile.outcome == 'failure') }}
+        run: |
+          if docker run --rm -v kicad-wasm-ci_kicad-build-cache:/bw:ro alpine test -d /bw/.ccache; then
+            mkdir -p build-wasm/ci-ccache
+            docker run --rm -v kicad-wasm-ci_kicad-build-cache:/bw:ro \
+              -v "$PWD/build-wasm/ci-ccache":/cache \
+              alpine sh -c 'tar cf /cache/ccache.tar -C /bw .ccache'
+            sudo chown "$(id -u):$(id -g)" build-wasm/ci-ccache/ccache.tar
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            source scripts/common/versions.sh
+            IMAGE=$(docker compose -f docker/docker-compose.yml images -q kicad-wasm-builder)
+            docker run --rm -v kicad-wasm-ci_kicad-build-cache:/workspace/build-wasm \
+              --entrypoint ccache "$IMAGE" --show-stats
+          fi
+
+      - name: Save compiler cache
+        if: ${{ !cancelled() && steps.compiler-cache.outputs.ready == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build-wasm/ci-ccache/ccache.tar
+          key: ccache-v1-${{ matrix.group }}-${{ runner.os }}-${{ steps.keys.outputs.emv }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Package deps for cache
         if: steps.wasm-cache.outputs.cache-hit != 'true' && steps.deps-cache.outputs.cache-hit != 'true'
@@ -191,7 +253,7 @@ jobs:
       - name: Host post-process (ENV merge shim)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
-          ./docker/build.sh all --postprocess-only
+          ./docker/build.sh "$BUILD_APPS" --postprocess-only
           ls -lh output/*.wasm
 
       - name: Save WASM output cache
@@ -207,6 +269,84 @@ jobs:
             build-wasm/sysroot/include
             !output/*.wasm.debug.wasm
           key: ${{ steps.keys.outputs.key }}
+
+      # Tar preserves sysroot symlinks/modes. Only the editor owns shared
+      # runtime resources, so assembling shards never overwrites another's files.
+      - name: Package build shard
+        run: |
+          IFS=',' read -ra APPS <<< "$BUILD_APPS"
+          for app in "${APPS[@]}"; do
+            test -s "output/$app.js"
+            test -s "output/$app.wasm"
+          done
+          if [ "$BUILD_GROUP" = editor ]; then
+            tar --exclude='*.wasm.debug.wasm' -cf build-wasm/shard.tar output build-wasm/sysroot/include
+          else
+            tar --exclude='output/wx.js' --exclude='output/wx-dom.js' \
+              --exclude='output/images.tar.gz' --exclude='*.wasm.debug.wasm' \
+              -cf build-wasm/shard.tar output
+          fi
+
+      - name: Upload build shard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wasm-build-${{ matrix.group }}
+          path: build-wasm/shard.tar
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-logs-${{ matrix.group }}
+          path: logs/**
+          if-no-files-found: ignore
+
+  test:
+    name: Assemble and test all tools (Blacksmith)
+    needs: build
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 180
+    env:
+      KICAD_LOG_NESTED: "1"
+      BUILD_3D_VIEWER: ${{ inputs.build_3d_viewer }}
+      JOBS: "32"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Install test build toolchain
+        if: inputs.run_tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ xvfb autoconf automake make python-is-python3
+      - name: Compute test build inputs
+        id: keys
+        run: |
+          source scripts/common/versions.sh
+          {
+            echo "emv=$EMSCRIPTEN_VERSION"
+            echo "wx=$(git -C wxwidgets rev-parse HEAD)"
+            echo "kicad=$(git -C kicad rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wasm-build-*
+          path: build-wasm/shards
+      - name: Assemble isolated build outputs
+        run: |
+          for group in editor tools utilities; do
+            tar xf "build-wasm/shards/wasm-build-$group/shard.tar"
+          done
+          for app in kicad_editor kicad_tools occ_service ngspice_service calculator pl_editor gerbview; do
+            test -s "output/$app.js"
+            test -s "output/$app.wasm"
+          done
 
       # --- publishable artifact (release path) -------------------------------
       - name: Upload WASM output artifact
@@ -409,7 +549,7 @@ jobs:
         working-directory: tests
         # BUILD_3D_VIEWER=OFF cannot satisfy the six full-viewer suites; all
         # other KiCad suites plus the independent 3D WebGL harness still run.
-        run: xvfb-run -a npm run test:e2e -- --grep-invert '3D viewer'
+        run: xvfb-run -a npm run test:e2e -- --workers=16 --grep-invert '3D viewer'
 
       # The React web-app suite (web/) against the pnpm dev stack (frontend
       # :3048 + backend :3060, cold-started by Playwright's webServer on CI).
@@ -419,7 +559,7 @@ jobs:
         id: web_e2e
         if: inputs.run_tests && !cancelled() && steps.e2e.outcome != 'skipped'
         working-directory: tests
-        run: xvfb-run -a npm run test:web:ci
+        run: xvfb-run -a npm run test:web:ci -- --workers=16
 
       # Runtime-perf E2E (eeschema + pcbnew): measures the current build's
       # load / open+render / FPS and writes tests/test-results/perf-*.json.

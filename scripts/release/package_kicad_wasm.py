@@ -38,7 +38,7 @@ def package(source: pathlib.Path, destination: pathlib.Path) -> None:
         f"kicad_commit={git('-C', 'kicad', 'rev-parse', 'HEAD')}\n"
         f"wxwidgets_commit={git('-C', 'wxwidgets', 'rev-parse', 'HEAD')}\n"
         f"pcbjam_shared_commit={git('-C', 'web/pcbjam-shared', 'rev-parse', 'HEAD')}\n"
-        f"emscripten_version={emscripten}\nBUILD_3D_VIEWER=OFF\nparallel_jobs=12\n"
+        f"emscripten_version={emscripten}\nBUILD_3D_VIEWER=OFF\nparallel_jobs=32\n"
     )
     (destination / "BUILD-METADATA.txt").write_text(metadata)
     (destination / "SOURCE-LICENSES.txt").write_text(
