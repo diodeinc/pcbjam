@@ -43,6 +43,7 @@ KICAD_INCLUDES = -I../native \
                  -I$(KICAD_ROOT)/thirdparty/clipper2/Clipper2Lib/include \
                  -I$(KICAD_ROOT)/thirdparty/dynamic_bitset \
                  -I$(KICAD_ROOT)/thirdparty/rtree \
+                 -I$(KICAD_ROOT)/thirdparty/thread-pool \
                  -I$(KICAD_ROOT)/thirdparty/magic_enum/magic_enum \
                  -I$(KICAD_ROOT)/thirdparty/expected/include \
                  -I$(KICAD_ROOT)/thirdparty/nlohmann_json \
