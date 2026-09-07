@@ -15,11 +15,15 @@
 #ifdef __EMSCRIPTEN__
 
 #include <eda_draw_frame.h>
+#include <nlohmann/json.hpp>
 #include <pgm_base.h>
 #include <settings/app_settings.h>
 #include <settings/settings_manager.h>
 #include <string>
+#include <cmath>
+#include <regex>
 #include <wx/event.h>
+#include <wx/menu.h>
 #include <wx/window.h>
 
 #include "collab_common.h"
@@ -28,6 +32,8 @@
 // system-colour table every widget paints from.
 extern "C" void wxWasmSetDarkAppearance( bool dark );
 extern "C" bool wxWasmGetDarkAppearance();
+extern "C" void wxWasmSetChromeTheme( const int* colors, const char* font, int pixelSize,
+                                       bool dark );
 
 namespace pcbjam_theme {
 
@@ -76,6 +82,90 @@ inline void syncChromeAppearance( bool aDark )
         tlw->GetEventHandler()->ProcessEvent( evt );
         tlw->Refresh();
     }
+}
+
+/** Validate and synchronously install the complete native chrome palette and
+ * default font. This is deliberately free of wxWindow/DOM traffic, so it is
+ * safe from onRuntimeInitialized before main constructs any widgets. */
+inline bool setChromeThemeFlag( const std::string& aJson )
+{
+    static const char* keys[] = { "paper", "surface", "hover", "line", "ink", "muted",
+                                  "accent", "accentInk" };
+    static const std::regex colorPattern( "^#[0-9a-fA-F]{6}$" );
+
+    try
+    {
+        const nlohmann::json value = nlohmann::json::parse( aJson );
+        if( !value.is_object() || value.size() != 11 || !value.at( "font" ).is_string()
+            || value.at( "font" ).get<std::string>().empty()
+            || !value.at( "pixelSize" ).is_number() || !value.at( "dark" ).is_boolean() )
+            return false;
+
+        const double pixelSize = value.at( "pixelSize" ).get<double>();
+        if( !std::isfinite( pixelSize ) || pixelSize < 1.0 || pixelSize > 256.0 )
+            return false;
+
+        int colors[24];
+        for( size_t i = 0; i < 8; ++i )
+        {
+            const auto& field = value.at( keys[i] );
+            if( !field.is_string() || !std::regex_match( field.get_ref<const std::string&>(),
+                                                         colorPattern ) )
+                return false;
+
+            const std::string& color = field.get_ref<const std::string&>();
+            for( size_t channel = 0; channel < 3; ++channel )
+                colors[i * 3 + channel] = std::stoi( color.substr( 1 + channel * 2, 2 ),
+                                                      nullptr, 16 );
+        }
+
+        const std::string font = value.at( "font" ).get<std::string>();
+        wxWasmSetChromeTheme( colors, font.c_str(), static_cast<int>( std::lround( pixelSize ) ),
+                              value.at( "dark" ).get<bool>() );
+        return true;
+    }
+    catch( const std::exception& )
+    {
+        return false;
+    }
+}
+
+// wx's default event propagation excludes top-level children (dialogs), and
+// wxWasm Refresh invalidates only this window's canvas. Cover both explicitly.
+inline void refreshChromeWindows( wxWindow* aWindow )
+{
+    if( aWindow->IsTopLevel() )
+    {
+        wxSysColourChangedEvent evt;
+        evt.SetEventObject( aWindow );
+        aWindow->GetEventHandler()->ProcessEvent( evt );
+    }
+
+    for( wxWindow* child : aWindow->GetChildren() )
+        refreshChromeWindows( child );
+
+    aWindow->Refresh();
+}
+
+/** Widget-only work belongs on wx's event loop, not the board apply queue:
+ * a toolbar action holds that queue for the entire lifetime of its dialog.
+ * wx's dispatch interlock handles JSPI suspensions in these event handlers. */
+inline void refreshChromeTheme( EDA_DRAW_FRAME* aFrame )
+{
+    if( !aFrame )
+        return;
+
+    aFrame->CallAfter( [aFrame]() {
+        const bool menuHidden = aFrame->GetMenuBar() && !aFrame->GetMenuBar()->IsShown();
+        refreshChromeWindows( aFrame );
+        // System-colour handlers recreate menus; keep Registry's native bar hidden
+        // even while a modal dialog disables the toolbar's usual update pass.
+        if( menuHidden && aFrame->GetMenuBar() )
+        {
+            aFrame->GetMenuBar()->Hide();
+            aFrame->SendSizeEvent();
+        }
+    } );
 }
 
 /** Apply `aTheme` ("pcbjam-dark", "_builtin_default", …) to one frame. Runs

@@ -33,23 +33,31 @@
 #include <wx/window.h>
 #include <wx/frame.h>
 #include <wx/menu.h>
+#include <wx/choice.h>
+#include <wx/combobox.h>
 #include <wx/statusbr.h>
+#include <wx/wasm/private/dom.h>
+#include <wx/aui/auibar.h>
 #include <wx/aui/framemanager.h>
 #include <kiway.h>
 #include <kiway_player.h>
+#include <pcbjam_collab_history.h>
 #include <pcbjam_read_only.h>
 #include <project.h>
 
 #include "pcbjam_libs_reload.h"
 #include "pcbjam_async_policy.h"
+#include "pcbjam_theme.h"
 #include "open_gate.h"
 #include "timer_park.h"
+#include "collab_common.h"
 
 using namespace emscripten;
 
 // Per-editor entry points and frame probes — defined (with external linkage) in
 // pcbnew_embind.cpp / eeschema_embind.cpp.
 bool        pcbEditorActive();
+bool        pcbCollabCanLock();
 // libs 0017 §2c/2d: placed-footprint usage + update-from-library.
 int         pcbLibsFootprintUsage( std::string aLib, std::string aName );
 void        pcbLibsInvalidatePreloaded( std::string aLib );
@@ -63,6 +71,8 @@ void        pcbCollabApply( std::string aJson );
 void        pcbCollabApplyItems( std::string aJson );
 std::string pcbCollabSnapshot();
 std::string pcbCollabSnapshotItems();
+std::string pcbCollabSnapshotState( std::string aJson );
+void        pcbCollabPrepareItems( std::string aJson );
 std::string pcbCollabTestMoveFirst( int aDx, int aDy );
 std::string pcbCollabGetPos( std::string aId );
 bool        pcbCollabTestRemoveItem( std::string aId );
@@ -70,6 +80,9 @@ bool        pcbCollabTestRotateItem( std::string aId, double aDeg );
 // Collab-aware undo (ysync miss 09).
 bool        pcbCollabTestUndo();
 int         pcbCollabTestUndoDepth();
+bool        pcbCollabSetHistoryMode( bool aEnabled );
+bool        pcbCollabTestRedo();
+int         pcbCollabTestRedoDepth();
 // Presence (collab-presence 0002) + comment pins/panning (0005).
 void        pcbCollabPresenceStart();
 void        pcbCollabSetRemote( std::string aJson );
@@ -96,16 +109,10 @@ bool        pcbCollabTestClearSelection();
 // Live color-theme switch (comments-ux 0002 F4).
 void        pcbSetColorTheme( std::string aTheme );
 void        pcbSetDarkChrome( bool aDark );
-
-// Post-theme-apply hook shared with pcbjam_theme.h — identical inline-variable
-// definition instead of including that header (this TU stays header-light);
-// keep the two declarations in sync.
-namespace pcbjam_theme
-{
-inline void ( *g_afterThemeApplied )() = nullptr;
-}
+void        pcbRefreshChromeTheme();
 
 bool        schEditorActive();
+bool        schCollabCanLock();
 int         schLibsSymbolUsage( std::string aLibNickname, std::string aSymbolName );
 void        schCollabApply( std::string aJson );
 void        schCollabApplyItems( std::string aJson );
@@ -118,6 +125,9 @@ bool        schCollabTestRotateItem( std::string aId, double aDeg );
 // Collab-aware undo (ysync miss 09).
 bool        schCollabTestUndo();
 int         schCollabTestUndoDepth();
+bool        schCollabSetHistoryMode( bool aEnabled );
+bool        schCollabTestRedo();
+int         schCollabTestRedoDepth();
 // Presence (collab-presence 0003 — eeschema counterparts) + pins (0005).
 void        schCollabPresenceStart();
 void        schCollabSetRemote( std::string aJson );
@@ -129,6 +139,7 @@ void        schCollabFitViewport( double aCx, double aCy, double aHalfW, double 
 void        schCollabSetStyle( std::string aJson );
 // Live color-theme switch (comments-ux 0002 F4).
 void        schSetColorTheme( std::string aTheme );
+void        schRefreshChromeTheme();
 std::string schCollabTestListItems( int aCount );
 std::string schCollabTestDemoSet();
 std::string schCollabGetViewport();
@@ -199,6 +210,162 @@ static bool kicadTestArmTimerPark( int aDelayMs, int aParkMs )
 static std::string kicadTestTimerParkState()
 {
     return pcbjam_timer_park::stateJson();
+}
+
+
+// Registry owns the main toolbar. Keep native menus alive as the command/state
+// source of truth; hide their windows through AUI so the canvas gains the space.
+static bool kicadUseWebToolbar();
+
+static std::string kicadWebToolbarState()
+{
+    auto* frame = wxTheApp ? dynamic_cast<wxFrame*>( wxTheApp->GetTopWindow() ) : nullptr;
+    nlohmann::json state = { { "enabled", false }, { "menus", nlohmann::json::array() },
+                             { "toolbars", nlohmann::json::array() } };
+    if( !frame || !frame->GetMenuBar() ) return state.dump();
+    auto* bar = frame->GetMenuBar();
+    // Theme/menu rebuilds must not resurrect the desktop chrome.
+    if( bar->IsShown() && frame->IsEnabled() ) kicadUseWebToolbar();
+    state["enabled"] = frame->IsEnabled() && !PCBJAM_READ_ONLY::IsReadOnly();
+    for( size_t i = 0; i < bar->GetMenuCount(); ++i )
+    {
+        // Hidden menus no longer receive wx's normal update-UI pass. Refresh
+        // from the same native handlers before exposing command availability.
+        bar->GetMenu( i )->UpdateUI( frame->GetEventHandler() );
+        state["menus"].push_back( {
+            { "title", pcbjam_collab::toUtf8( bar->GetMenuLabelText( i ) ) },
+            { "items", nlohmann::json::parse( pcbjam_collab::toUtf8( bar->GetMenu( i )->WasmItemsToJson() ) ) }
+        } );
+    }
+    if( auto* mgr = wxAuiManager::GetManager( frame ) )
+    {
+        for( int paneIndex = 0; paneIndex < 2; ++paneIndex )
+        {
+            const wxString paneName = paneIndex == 0 ? wxT( "TopMainToolbar" ) : wxT( "TopAuxToolbar" );
+            auto& pane = mgr->GetPane( paneName );
+            auto items = nlohmann::json::array();
+            auto* toolbar = pane.IsOk() ? dynamic_cast<wxAuiToolBar*>( pane.window ) : nullptr;
+            if( toolbar )
+            {
+                toolbar->UpdateWindowUI( wxUPDATE_UI_RECURSE );
+                for( size_t i = 0; i < toolbar->GetToolCount(); ++i )
+                {
+                    wxAuiToolBarItem* item = toolbar->FindToolByIndex( i );
+                    if( !item ) continue;
+                    if( item->GetKind() == wxITEM_SEPARATOR )
+                    {
+                        items.push_back( { { "kind", "separator" } } );
+                        continue;
+                    }
+                    if( wxWindow* window = item->GetWindow() )
+                    {
+                        auto* choice = dynamic_cast<wxItemContainer*>( window );
+                        if( !choice || !choice->GetCount() ) continue;
+                        auto options = nlohmann::json::array();
+                        for( unsigned option = 0; option < choice->GetCount(); ++option )
+                            options.push_back( pcbjam_collab::toUtf8( choice->GetString( option ) ) );
+                        items.push_back( { { "kind", "choice" }, { "id", window->GetId() },
+                            { "label", pcbjam_collab::toUtf8( item->GetLabel() ) },
+                            { "options", options }, { "selected", choice->GetSelection() },
+                            { "enabled", window->IsThisEnabled() } } );
+                        continue;
+                    }
+                    const int id = item->GetId();
+                    items.push_back( { { "kind", "command" }, { "id", id },
+                        { "label", pcbjam_collab::toUtf8( item->GetLabel() ) },
+                        { "tooltip", pcbjam_collab::toUtf8( item->GetShortHelp() ) },
+                        { "icon", pcbjam_collab::toUtf8( wxDomBitmapToDataURL( item->GetBitmapFor( toolbar ) ) ) },
+                        { "enabled", toolbar->GetToolEnabled( id ) },
+                        { "checked", item->CanBeToggled() && toolbar->GetToolToggled( id ) } } );
+                }
+            }
+            state["toolbars"].push_back( { { "name", paneIndex == 0 ? "main" : "aux" },
+                                            { "items", items } } );
+        }
+    }
+    return state.dump();
+}
+
+static bool kicadUseWebToolbar()
+{
+    auto* frame = wxTheApp ? dynamic_cast<wxFrame*>( wxTheApp->GetTopWindow() ) : nullptr;
+    if( !frame || !frame->GetMenuBar() ) return false;
+    pcbjam_collab::runOnCoroutine( frame, [frame]() {
+        frame->GetMenuBar()->Hide();
+        if( auto* mgr = wxAuiManager::GetManager( frame ) )
+        {
+            auto& pane = mgr->GetPane( wxT( "TopMainToolbar" ) );
+            if( pane.IsOk() ) pane.Hide();
+            auto& auxiliary = mgr->GetPane( wxT( "TopAuxToolbar" ) );
+            if( auxiliary.IsOk() ) auxiliary.Hide();
+            mgr->Update();
+        }
+        frame->SendSizeEvent();
+    } );
+    return true;
+}
+
+static bool kicadWebToolbarCommand( int aId )
+{
+    auto* frame = wxTheApp ? dynamic_cast<wxFrame*>( wxTheApp->GetTopWindow() ) : nullptr;
+    if( !frame || !frame->IsEnabled() || PCBJAM_READ_ONLY::IsReadOnly()
+        || PCBJAM_REMOTE_LOCK::IsRenderLocked() || !frame->GetMenuBar() ) return false;
+    wxMenuItem* item = frame->GetMenuBar()->FindItem( aId );
+    wxAuiToolBar* toolbar = nullptr;
+    if( auto* mgr = wxAuiManager::GetManager( frame ) )
+        for( const auto& name : { wxT( "TopMainToolbar" ), wxT( "TopAuxToolbar" ) } )
+            if( auto& pane = mgr->GetPane( name ); pane.IsOk() )
+                if( auto* candidate = dynamic_cast<wxAuiToolBar*>( pane.window );
+                    candidate && candidate->FindTool( aId ) ) toolbar = candidate;
+    if( item && ( !item->IsEnabled() || item->IsSeparator() || item->GetSubMenu() ) ) return false;
+    if( !item && ( !toolbar || !toolbar->GetToolEnabled( aId ) ) ) return false;
+    // Preserve submenu handlers and radio/check semantics, not just the final
+    // frame event. Dispatch on a coroutine so native modal tools can suspend.
+    pcbjam_collab::runOnCoroutine( frame, [frame, aId]() {
+        if( !frame->IsEnabled() || PCBJAM_READ_ONLY::IsReadOnly()
+            || PCBJAM_REMOTE_LOCK::IsRenderLocked() ) return;
+        wxMenu* menu = nullptr;
+        wxMenuItem* current = frame->GetMenuBar()->FindItem( aId, &menu );
+        if( menu && current && current->IsEnabled() )
+        {
+            if( current->IsCheckable() ) current->Toggle();
+            menu->SendEvent( aId, current->IsCheckable() ? current->IsChecked() : -1 );
+            return;
+        }
+        wxCommandEvent event( wxEVT_TOOL, aId );
+        event.SetEventObject( frame );
+        frame->GetEventHandler()->ProcessEvent( event );
+    } );
+    return true;
+}
+
+
+static bool kicadWebToolbarChoice( int aId, int aSelection )
+{
+    auto* frame = wxTheApp ? dynamic_cast<wxFrame*>( wxTheApp->GetTopWindow() ) : nullptr;
+    if( !frame || !frame->IsEnabled() || PCBJAM_READ_ONLY::IsReadOnly()
+        || PCBJAM_REMOTE_LOCK::IsRenderLocked() ) return false;
+    auto* mgr = wxAuiManager::GetManager( frame );
+    if( !mgr ) return false;
+    for( const auto& name : { wxT( "TopMainToolbar" ), wxT( "TopAuxToolbar" ) } )
+    {
+    auto& pane = mgr->GetPane( name );
+    if( !pane.IsOk() ) continue;
+    for( wxWindow* child : pane.window->GetChildren() )
+    {
+        auto* choice = dynamic_cast<wxItemContainer*>( child );
+        if( child->GetId() != aId || !choice || !child->IsThisEnabled() ) continue;
+        if( aSelection < 0 || aSelection >= (int) choice->GetCount() ) return false;
+        choice->SetSelection( aSelection );
+        wxCommandEvent event( dynamic_cast<wxChoice*>( child ) ? wxEVT_CHOICE : wxEVT_COMBOBOX, aId );
+        event.SetInt( aSelection );
+        event.SetString( choice->GetString( aSelection ) );
+        event.SetEventObject( child );
+        child->GetEventHandler()->AddPendingEvent( event );
+        return true;
+    }
+    }
+    return false;
 }
 
 
@@ -371,6 +538,40 @@ static void collabApply( std::string aJson )
     pcbEditorActive() ? pcbCollabApply( aJson ) : schCollabApply( aJson );
 }
 
+static bool kicadCollabTryLock()
+{
+    KIWAY_PLAYER* frame =
+            wxTheApp ? dynamic_cast<KIWAY_PLAYER*>( wxTheApp->GetTopWindow() ) : nullptr;
+
+    if( !frame || !frame->IsEnabled() )
+    {
+        return false;
+    }
+
+    TOOL_MANAGER* mgr = frame->GetToolManager();
+
+    if( !mgr )
+        return false;
+
+    if( pcbEditorActive() )
+    {
+        if( !mgr->IsCollabCheckpoint() || !pcbCollabCanLock() )
+            return false;
+    }
+    else if( !frame->CanAcceptApiCommands() || !frame->ToolStackIsEmpty()
+             || !mgr->IsCollabMutationSafe() || !schCollabCanLock() )
+    {
+        return false;
+    }
+
+    return pcbjam_collab::basicTryLock( pcbjam_open::busy() );
+}
+
+static void kicadCollabUnlock()
+{
+    pcbjam_collab::unlock();
+}
+
 static void collabApplyItems( std::string aJson )
 {
     pcbEditorActive() ? pcbCollabApplyItems( aJson ) : schCollabApplyItems( aJson );
@@ -416,6 +617,27 @@ static bool collabTestUndo()
 static int collabTestUndoDepth()
 {
     return pcbEditorActive() ? pcbCollabTestUndoDepth() : schCollabTestUndoDepth();
+}
+
+static bool collabSetHistoryMode( bool aEnabled )
+{
+    return pcbEditorActive() ? pcbCollabSetHistoryMode( aEnabled )
+                             : schCollabSetHistoryMode( aEnabled );
+}
+
+static void collabSetHistoryState( bool aCanUndo, bool aCanRedo )
+{
+    PCBJAM_COLLAB_HISTORY::SetState( aCanUndo, aCanRedo );
+}
+
+static bool collabTestRedo()
+{
+    return pcbEditorActive() ? pcbCollabTestRedo() : schCollabTestRedo();
+}
+
+static int collabTestRedoDepth()
+{
+    return pcbEditorActive() ? pcbCollabTestRedoDepth() : schCollabTestRedoDepth();
 }
 
 // Placed-instance count for a library symbol — meaningful only with a schematic
@@ -563,6 +785,16 @@ static void setDarkChrome( bool aDark )
     pcbSetDarkChrome( aDark );
 }
 
+static bool setChromeTheme( std::string aJson )
+{
+    if( !pcbjam_theme::setChromeThemeFlag( aJson ) )
+        return false;
+
+    pcbRefreshChromeTheme();
+    schRefreshChromeTheme();
+    return true;
+}
+
 static std::string collabTestListItems( int aCount )
 {
     return pcbEditorActive() ? pcbCollabTestListItems( aCount ) : schCollabTestListItems( aCount );
@@ -632,6 +864,8 @@ static bool kicadCollabBusyProbe()
 }
 
 EMSCRIPTEN_BINDINGS(kicad_editor) {
+    function("kicadCollabTryLock", &kicadCollabTryLock);
+    function("kicadCollabUnlock", &kicadCollabUnlock);
     // Apply-queue idle probe (drift-trio finding #10b): a scratch save taken
     // while a collab apply is in flight (queued, or suspended mid-commit)
     // would serialize a half-mutated model — the JS side must defer scratch
@@ -648,6 +882,10 @@ EMSCRIPTEN_BINDINGS(kicad_editor) {
 
     // Canvas-only mobile mode (features/mobile).
     function("kicadSetChrome", &kicadSetChrome);
+    function("kicadWebToolbarState", &kicadWebToolbarState);
+    function("kicadUseWebToolbar", &kicadUseWebToolbar);
+    function("kicadWebToolbarCommand", &kicadWebToolbarCommand);
+    function("kicadWebToolbarChoice", &kicadWebToolbarChoice);
 
     // Read-only viewer lock (read-only-viewer).
     function("kicadSetReadOnly", &kicadSetReadOnly);
@@ -658,6 +896,8 @@ EMSCRIPTEN_BINDINGS(kicad_editor) {
     function("kicadCollabSnapshot", &collabSnapshot);
     function("kicadCollabApplyItems", &collabApplyItems);
     function("kicadCollabSnapshotItems", &collabSnapshotItems);
+    function("kicadCollabSnapshotState", &pcbCollabSnapshotState);
+    function("kicadCollabPrepareItems", &pcbCollabPrepareItems);
     function("kicadCollabTestMoveFirst", &collabTestMoveFirst);
     function("kicadCollabGetPos", &collabGetPos);
     // ysync-review repro hooks (shared names; per-editor-only hooks — pad size,
@@ -667,6 +907,10 @@ EMSCRIPTEN_BINDINGS(kicad_editor) {
     // Collab-aware undo (ysync miss 09).
     function("kicadCollabTestUndo", &collabTestUndo);
     function("kicadCollabTestUndoDepth", &collabTestUndoDepth);
+    function("kicadCollabSetHistoryMode", &collabSetHistoryMode);
+    function("kicadCollabSetHistoryState", &collabSetHistoryState);
+    function("kicadCollabTestRedo", &collabTestRedo);
+    function("kicadCollabTestRedoDepth", &collabTestRedoDepth);
     // Presence (collab-presence 0002/0003) + comment pins/panning (0005).
     function("kicadCollabPresenceStart", &collabPresenceStart);
     function("kicadCollabSetRemote", &collabSetRemote);
@@ -676,6 +920,7 @@ EMSCRIPTEN_BINDINGS(kicad_editor) {
     // Live color-theme switch (comments-ux 0002 F4).
     function("kicadSetColorTheme", &setColorTheme);
     function("kicadSetDarkChrome", &setDarkChrome);
+    function("kicadSetChromeTheme", &setChromeTheme);
     // Follow-user (collab-presence 0008).
     function("kicadCollabFitViewport", &collabFitViewport);
     function("kicadCollabSetStyle", &collabSetStyle);

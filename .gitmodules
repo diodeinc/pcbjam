@@ -1,11 +1,11 @@
 [submodule "kicad"]
 	path = kicad
-	url = https://github.com/PCBJam/kicad-source-mirror.git
-	branch = wasm-port
+	url = https://gitlab.com/diode-inc/kicad.git
+	branch = diode-wasm
 [submodule "wxwidgets"]
 	path = wxwidgets
-	url = https://github.com/PCBJam/wxWidgets.git
-	branch = wasm-port
+	url = https://github.com/diodeinc/wxWidgets.git
+	branch = diode-wasm
 [submodule "web/pcbjam-shared"]
 	path = web/pcbjam-shared
 	url = https://github.com/PCBJam/pcbjam-shared.git

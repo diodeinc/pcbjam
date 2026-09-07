@@ -1,9 +1,8 @@
 name: wasm-build (reusable)
 
-# THE single KiCad WASM build+test recipe, called by ci-ubicloud.yml (main/PR) and
-# release.yml (tag). Both build the SAME way — the only build knob is the
-# 3D-viewer flag, ON for both real callers — so the build can never diverge from
-# what ships (the bug that once shipped a 3D-off demo while CI built 3D-on).
+# THE single KiCad WASM build+test recipe, called by CI and release.
+# Both callers pass the validated 3D-off configuration, so CI and shipped bytes
+# cannot diverge.
 #
 # ONE output cache around docker/build.sh's --compile-only / --postprocess-only
 # split. Under JSPI the wasm links fully finalized in-container; the only host
@@ -23,7 +22,7 @@ on:
       build_3d_viewer:
         description: "Build the WASM 3D viewer into kicad_editor (ON/OFF)"
         type: string
-        default: "ON"
+        default: "OFF"
       run_tests:
         description: "Run the wxWidgets + KiCad e2e suites after building"
         type: boolean
@@ -36,35 +35,17 @@ on:
         description: "Upload the publishable output/ subset as the 'wasm-output' artifact"
         type: boolean
         default: false
-    secrets:
-      # Declared so this reusable workflow may reference ${{ secrets.DISCORD_WEBHOOK_URL }}
-      # (an undeclared secret reference is a workflow startup failure). ci-ubicloud.yml
-      # passes it via `secrets: inherit`; release.yml doesn't (required: false) → the
-      # screenshot/perf report step just no-ops there.
-      DISCORD_WEBHOOK_URL:
-        required: false
-      # Read-only S3 keypair for the private R2 screenshot-baseline bucket
-      # (pcbjam-ci-screenshots). Optional for the same reason: without them the
-      # baseline fetch skips and the compare gate no-ops (report-only pipeline).
-      CI_SCREENSHOTS_S3_ACCESS_KEY_ID:
-        required: false
-      CI_SCREENSHOTS_S3_SECRET_ACCESS_KEY:
-        required: false
-      # WRITE keypair for the per-run screenshot uploads (runs/pcbjam/<run-id>/,
-      # 30-day R2 lifecycle) consumed by the morelli review app. Optional for the
-      # same reason: without it the upload-run step just no-ops.
-      CI_SCREENSHOTS_S3_WRITE_ACCESS_KEY_ID:
-        required: false
-      CI_SCREENSHOTS_S3_WRITE_SECRET_ACCESS_KEY:
-        required: false
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
-    name: Build all tools + KiCad e2e (Ubicloud)
+    name: Build all tools + KiCad e2e (Blacksmith)
     # Don't run untrusted fork PRs on the paid runner (push/dispatch always run;
     # same-repo PRs run). github.event_name here is the CALLER's event.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubicloud-standard-30
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 300
     env:
       KICAD_LOG_NESTED: "1"
@@ -79,13 +60,18 @@ jobs:
           # xvfb: kicad e2e runs headed Firefox under a virtual display.
           # autoconf/automake/make: host wxWidgets + wx test-app builds.
           # cmake/ninja/g++: host GAL/3D test-app builds.
-          sudo apt-get install -y cmake ninja-build g++ xvfb autoconf automake make
+          # python: wxWidgets' generated STC interface uses /usr/bin/env python.
+          sudo apt-get install -y cmake ninja-build g++ xvfb autoconf automake make python-is-python3
 
-      - uses: actions/checkout@v4
-        with: { submodules: recursive }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
 
       # --- cache key ---------------------------------------------------------
       # ONE key, from the compile inputs only: kicad/wx submodule SHAs, the sc
@@ -96,14 +82,16 @@ jobs:
       # post-processed output — no separate post-process tier.
       - name: Compute build inputs
         id: keys
+        env:
+          THREED: ${{ inputs.build_3d_viewer }}
+          CACHE_RUNNER_OS: ${{ runner.os }}
         run: |
           KICAD=$(git -C kicad rev-parse HEAD)
           WX=$(git -C wxwidgets rev-parse HEAD)
           SC=$(node scripts/deploy/wasm-cache-hash.mjs)
           EPOCH=$(cat .ci-cache-epoch 2>/dev/null || echo 0)
           EMV=$(. scripts/common/versions.sh && echo "$EMSCRIPTEN_VERSION")
-          THREED='${{ inputs.build_3d_viewer }}'
-          KEY="kwasm-${{ runner.os }}-k${KICAD}-wx${WX}-sc${SC}-3d${THREED}-e${EPOCH}"
+          KEY="kwasm-v2-${CACHE_RUNNER_OS}-k${KICAD}-wx${WX}-sc${SC}-3d${THREED}-j12-e${EPOCH}"
           {
             echo "kicad=$KICAD"; echo "wx=$WX"; echo "sc=$SC"; echo "epoch=$EPOCH"
             echo "emv=$EMV"
@@ -128,7 +116,7 @@ jobs:
       - name: Restore WASM output cache
         id: wasm-cache
         if: steps.cachectl.outputs.skip != 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             output/*.js
@@ -146,11 +134,14 @@ jobs:
       - name: Check dependency tarball pins
         run: scripts/deps/check-pins.sh
 
+      - name: Test release packaging
+        run: python3 -m unittest discover -s scripts/release -v
+
       # deps (sysroot + stamps) are only needed when we must COMPILE (cache miss).
       - name: Restore deps cache
         id: deps-cache
         if: steps.wasm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps-cache
           key: deps-${{ runner.os }}-${{ hashFiles('scripts/deps/**','scripts/common/versions.sh','scripts/common/functions.sh','scripts/common/env.sh','docker/Dockerfile','docker/docker-compose.yml') }}
@@ -168,9 +159,11 @@ jobs:
       - name: Compile all KiCad tools (container)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
-          export KICAD_DOCKER_CPUS="$(( $(nproc) - 1 ))" KICAD_DOCKER_MEM=110G
-          echo "Compiling ALL tools, 3D viewer=${BUILD_3D_VIEWER}, -j $(nproc)"
-          ./docker/build.sh all --compile-only --build-deps -j "$(nproc)"
+          # Bound parallel compiler/linker pressure: Emscripten links are memory-heavy.
+          JOBS=$(( $(nproc) < 12 ? $(nproc) : 12 ))
+          export KICAD_DOCKER_CPUS="$JOBS" KICAD_DOCKER_MEM=48G
+          echo "Compiling ALL tools, 3D viewer=${BUILD_3D_VIEWER}, -j $JOBS"
+          ./docker/build.sh all --compile-only --build-deps -j "$JOBS"
           ls -lh output/*.wasm
 
       - name: Package deps for cache
@@ -203,7 +196,7 @@ jobs:
 
       - name: Save WASM output cache
         if: steps.wasm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             output/*.js
@@ -218,7 +211,7 @@ jobs:
       # --- publishable artifact (release path) -------------------------------
       - name: Upload WASM output artifact
         if: inputs.upload_output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wasm-output
           if-no-files-found: error
@@ -240,7 +233,7 @@ jobs:
       # are pruned below before the post-job save.
       - name: Cache emsdk toolchain
         if: inputs.run_tests
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: tools/emsdk
           key: emsdk-${{ runner.os }}-${{ steps.keys.outputs.emv }}
@@ -248,7 +241,7 @@ jobs:
       - name: Restore wx build cache
         id: wx-cache
         if: inputs.run_tests
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build-wasm/wxwidgets
           key: wx-${{ runner.os }}-${{ steps.keys.outputs.wx }}-${{ hashFiles('scripts/build-wx-wasm.sh','scripts/common/versions.sh') }}
@@ -286,7 +279,7 @@ jobs:
       - name: Cache built wx test apps
         id: testapps-cache
         if: inputs.run_tests && steps.wx-cache.outputs.cache-hit == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             tests/apps
@@ -324,61 +317,7 @@ jobs:
         working-directory: tests
         run: npm ci
 
-      # The baseline manifest lives in R2 (written only by the morelli review
-      # app + its seed script) — download it FIRST so this whole run pins to
-      # one manifest version and the cache step below can key on its hash.
-      # continue-on-error + the no-creds skip (which also deletes any stale
-      # local copy) keep secretless callers green — every later screenshot
-      # step then skips rather than gating on outdated baselines.
-      - name: Fetch baseline manifest from R2
-        if: inputs.run_tests
-        continue-on-error: true
-        working-directory: tests
-        env:
-          CI_SCREENSHOTS_S3_ENDPOINT: ${{ vars.CI_SCREENSHOTS_S3_ENDPOINT }}
-          CI_SCREENSHOTS_S3_ACCESS_KEY_ID: ${{ secrets.CI_SCREENSHOTS_S3_ACCESS_KEY_ID }}
-          CI_SCREENSHOTS_S3_SECRET_ACCESS_KEY: ${{ secrets.CI_SCREENSHOTS_S3_SECRET_ACCESS_KEY }}
-        run: npm run screenshots:fetch-manifest
-
-      # Baseline screenshots live in a private R2 bucket, pinned by the manifest
-      # fetched above; this cache keyed on the manifest hash makes most fetches
-      # a no-op (hashFiles evaluates at step run time, AFTER the fetch; a
-      # skipped fetch hashes to empty → restore-keys still warms the tree).
-      # restore-keys makes a manifest change INCREMENTAL (restore the previous
-      # tree, download only the changed objects) instead of a full ~35MB
-      # re-download. A stale or partial restore is safe: r2-sync hash-verifies
-      # every file and deletes unlisted ones, and compare.ts refuses to gate
-      # against an incomplete cache.
-      - name: Cache screenshot baselines
-        if: inputs.run_tests
-        uses: actions/cache@v4
-        with:
-          path: tests/baseline-screenshots
-          key: baselines-${{ hashFiles('tests/.baseline-manifest.json') }}
-          restore-keys: |
-            baselines-
-
-      # continue-on-error: the screenshot pipeline is deliberately report-only
-      # (see the report step) — an R2 outage must not fail the build. Without
-      # credentials (release.yml, fork PRs) r2-sync skips with a warning and
-      # compare.ts later no-ops for the same reason.
-      - name: Fetch screenshot baselines from R2
-        if: inputs.run_tests
-        continue-on-error: true
-        working-directory: tests
-        env:
-          CI_SCREENSHOTS_S3_ENDPOINT: ${{ vars.CI_SCREENSHOTS_S3_ENDPOINT }}
-          CI_SCREENSHOTS_S3_ACCESS_KEY_ID: ${{ secrets.CI_SCREENSHOTS_S3_ACCESS_KEY_ID }}
-          CI_SCREENSHOTS_S3_SECRET_ACCESS_KEY: ${{ secrets.CI_SCREENSHOTS_S3_SECRET_ACCESS_KEY }}
-        run: npm run screenshots:fetch
-
-      # Cheap hygiene gates (no build needed): the determinism lint keeps the
-      # banned flake patterns out of the specs, and the CI-coverage lint proves
-      # every spec file on disk is reachable from the npm scripts THIS workflow
-      # invokes (a spec/project that CI never runs is how the web suite once
-      # rotted unnoticed). (The old screenshot-manifest --check gate went with
-      # the committed manifest — the manifest now lives in R2, written only by
-      # the morelli app, which validates on every promote.)
+      # Cheap hygiene gates (no build needed): determinism and CI reachability.
       - name: Lint test determinism + CI coverage
         if: inputs.run_tests
         working-directory: tests
@@ -441,7 +380,7 @@ jobs:
       # apt-installs its small OS dep set either way.
       - name: Cache Playwright browsers
         if: inputs.run_tests
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: pw-${{ runner.os }}-${{ hashFiles('tests/package-lock.json') }}
@@ -468,7 +407,9 @@ jobs:
         id: e2e
         if: inputs.run_tests
         working-directory: tests
-        run: xvfb-run -a npm run test:e2e
+        # BUILD_3D_VIEWER=OFF cannot satisfy the six full-viewer suites; all
+        # other KiCad suites plus the independent 3D WebGL harness still run.
+        run: xvfb-run -a npm run test:e2e -- --grep-invert '3D viewer'
 
       # The React web-app suite (web/) against the pnpm dev stack (frontend
       # :3048 + backend :3060, cold-started by Playwright's webServer on CI).
@@ -508,82 +449,11 @@ jobs:
           npm run 3d:check:webgl
           npm run 3d:review
 
-      # Screenshot drift gate + Discord report (perf + triptychs). Runs whenever
-      # the e2e suites ran — INCLUDING on e2e failure — so a wrong or missing
-      # screenshot is visible on Discord even on a red build (a spec that died
-      # before its page.screenshot() shows up as "removed"). The --e2e badge is
-      # computed from the suite outcomes. Report-only during rollout: compare.ts
-      # exits 0 without --fail-on-change and the step is continue-on-error, so it
-      # never blocks the build — flip to gating once the per-engine floors are
-      # calibrated (tests/tools/screenshots/config.ts, seeded by
-      # `npm run screenshots:noise`). Posts ONLY on push to main and no-ops
-      # without DISCORD_WEBHOOK_URL (inert on PRs/forks). No extra build — reads
-      # the already-produced test-results (screenshots + perf-*.json).
-      - name: Screenshot report + perf
-        id: report
-        if: inputs.run_tests && !cancelled() && steps.e2e.outcome != 'skipped'
-        continue-on-error: true
-        working-directory: tests
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          GH_TOKEN: ${{ github.token }}
-        # Report-only: post the screenshot drift + perf table to Discord but NEVER fail the
-        # build on a screenshot difference — the Discord post is the signal. compare.ts exits 0
-        # without --fail-on-change; continue-on-error also shields transient Discord hiccups.
-        run: |
-          E2E=pass
-          { [ "${{ steps.e2e.outcome }}" = "success" ] \
-            && [ "${{ steps.web_e2e.outcome }}" = "success" ]; } || E2E=fail
-          npm run screenshots:check
-          npm run screenshots:report -- --e2e "$E2E"
-
-      # Durable per-run screenshot store for the morelli review app: upload this
-      # run's renders + meta.json to runs/pcbjam/<run-id>/ in the R2 bucket
-      # (30-day lifecycle rule — GH artifacts stay the debugging archive, R2 is
-      # the promotion source). Runs AFTER the report step so compare.ts's
-      # report.json exists to embed. Needs the WRITE keypair (mapped onto the
-      # standard env names for this step only); without it the tool no-ops, so
-      # forks/secretless callers stay green. Never blocks a build.
-      - name: Upload run screenshots to R2
-        if: inputs.run_tests && !cancelled() && steps.e2e.outcome != 'skipped'
-        continue-on-error: true
-        working-directory: tests
-        env:
-          CI_SCREENSHOTS_S3_ENDPOINT: ${{ vars.CI_SCREENSHOTS_S3_ENDPOINT }}
-          CI_SCREENSHOTS_S3_ACCESS_KEY_ID: ${{ secrets.CI_SCREENSHOTS_S3_WRITE_ACCESS_KEY_ID }}
-          CI_SCREENSHOTS_S3_SECRET_ACCESS_KEY: ${{ secrets.CI_SCREENSHOTS_S3_WRITE_SECRET_ACCESS_KEY }}
-        run: |
-          E2E=pass
-          { [ "${{ steps.e2e.outcome }}" = "success" ] \
-            && [ "${{ steps.web_e2e.outcome }}" = "success" ]; } || E2E=fail
-          npm run screenshots:upload-run -- --e2e "$E2E"
-
-      # FALLBACK on failure: a minimal text-only "CI failed" notice, only when the
-      # rich screenshot report above did NOT post (build broke before the tests →
-      # report skipped, or the report itself errored). An e2e-only failure already
-      # posts the full report with the ❌ e2e badge + run URL — no duplicate ping.
-      # Uses curl, NOT the TS reporter, because on a build failure the test deps
-      # (npm ci) never installed. Main-push only.
-      - name: Discord CI-failure notice
-        if: failure() && github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.report.outcome != 'success'
-        continue-on-error: true
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          [ -z "$DISCORD_WEBHOOK_URL" ] && { echo "no webhook — skipping"; exit 0; }
-          SHORT="$(echo "${{ github.sha }}" | cut -c1-7)"
-          URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          SUBJ="$(git log -1 --pretty=%s 2>/dev/null || true)"
-          CONTENT="❌ **CI failed** \`$SHORT\` — $SUBJ"$'\n'"$URL"
-          jq -n --arg c "$CONTENT" '{content:$c, allowed_mentions:{parse:[]}}' \
-            | curl -sS -X POST "$DISCORD_WEBHOOK_URL" -H "Content-Type: application/json" -d @- >/dev/null \
-            && echo "posted CI-failure notice"
-
       - name: Upload test logs & screenshots
         if: always() && inputs.run_tests
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ubicloud-e2e-${{ github.run_id }}
+          name: diode-e2e-${{ github.run_id }}
           path: |
             tests/logs/**
             tests/test-results/**

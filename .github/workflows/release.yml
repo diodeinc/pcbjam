@@ -1,258 +1,63 @@
-name: release
-
-# Release pipeline on a vX.Y.Z tag, in order:
-#   1) build  — the SAME wasm-build.yml recipe as CI + the e2e gate. For an
-#               already-built commit this hits main's WASM output cache and
-#               skips the build entirely. Uploads output/.
-#   2) publish-wasm — push the build to the CDN (content-addressed, idempotent)
-#               and write manifest-<tag>.json. The registry now reflects THIS tag.
-#   3) deploy-demo  — build the standalone pinned to that manifest + deploy to
-#               demo.pcbjam.com. So the demo can never point at stale wasm.
-#
-# Libraries are NOT published here (they change only on a KiCad lib-version bump):
-# run publish-libs.yml once per LIB_TAG; this deploy just points the demo at
-# libs/kicad/$LIB_TAG. WASM publishing is folded in here (no separate manual
-# workflow), so the build that ships is exactly the build that was tested.
+name: Diode release
 
 on:
   push:
-    tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to build + deploy, e.g. v1.2.3"
-        required: true
+    tags: ["diode-v*"]
+
+permissions:
+  contents: read
 
 concurrency:
-  group: release
+  group: diode-release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  CDN: https://cdn.pcbjam.com
-  BUCKET: pcbjam-cdn
-  # KiCad library snapshot the demo points at (published by publish-libs.yml).
-  LIB_TAG: "10.0.3"
-  # kicad-packages3D snapshot the demo's lazy 3D models point at (published once
-  # to libs/kicad-models/<MODELS_TAG>/ — see scripts/deploy/publish-models.ts +
-  # upload-models-r2.sh; docs/features/3d-models). Empty ⇒ 3D models off.
-  # Keep in sync with deploy-demo.yml.
-  MODELS_TAG: "10.0.3"
-  PAGES_PROJECT: pcbjam-demo
-  PAGES_PROD_BRANCH: production
-  # Backed editor deployment (remote mode against the closed API). The closed
-  # stack (api./app.pcbjam.com) deploys from the pcbjam-private repo; release
-  # order when both change: pcbjam-private first, then this repo.
-  EDITOR_PAGES_PROJECT: pcbjam-editor
-  EDITOR_API_BASE: https://api.pcbjam.com
-  # Mgmt app origin: non-editor routes on the editor host redirect here
-  # (standalone-hardening 0006). The demo build never sets this.
-  EDITOR_APP_BASE: https://app.pcbjam.com
-  # Better Stack error-tracking DSN (Sentry wire format). Unset ⇒ builds report
-  # nothing, so this is safe to leave empty. Held as a secret rather than a
-  # literal: this repo is public, and although the token becomes visible in the
-  # shipped bundle anyway, keeping it out of git makes it rotatable without a
-  # commit. Keep in sync with deploy-demo.yml.
-  ERRORS_DSN: ${{ secrets.ERRORS_DSN }}
-  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-  WRANGLER_CMD: npx --yes wrangler@4
-
 jobs:
-  meta:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
-    steps:
-      # On workflow_dispatch GITHUB_REF_NAME is the branch, so prefer the input;
-      # on a tag push the input is empty and ref_name is the tag.
-      - id: tag
-        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
-
-  # 1) Build (identical to main) + e2e gate. Reuses main's WASM output cache for
-  #    an already-built commit. Uploads the publishable output/ as the
-  #    'wasm-output' artifact for the publish job.
   build:
+    if: github.repository == 'diodeinc/pcbjam'
     uses: ./.github/workflows/wasm-build.yml
     with:
-      build_3d_viewer: "ON"
+      build_3d_viewer: "OFF"
       run_tests: true
       upload_output: true
-    secrets:
-      # Read-only R2 pair so the screenshot drift report runs on tag builds too
-      # (baselines live in R2 now; without these the fetch/compare steps skip).
-      CI_SCREENSHOTS_S3_ACCESS_KEY_ID: ${{ secrets.CI_SCREENSHOTS_S3_ACCESS_KEY_ID }}
-      CI_SCREENSHOTS_S3_SECRET_ACCESS_KEY: ${{ secrets.CI_SCREENSHOTS_S3_SECRET_ACCESS_KEY }}
 
-  # 2) Publish the build to the CDN (content-addressed; unchanged tools reuse)
-  #    and write manifest-<tag>.json. The slow step is brotli-q11 over ~300MB of
-  #    wasm; the script compresses all files in parallel (one core per file), so
-  #    give it enough cores that wall time ≈ the largest single file.
-  publish-wasm:
-    needs: [meta, build]
-    runs-on: ubicloud-standard-8
+  package:
+    name: Package and publish GitHub Release
+    needs: build
+    if: github.repository == 'diodeinc/pcbjam'
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    permissions:
+      # gh release create uploads assets to this tagged repository release.
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: false
-      - name: Init pcbjam-shared submodule
-        # Not `git submodule update`: GitHub throttles that clone from the shared runner
-        # egress as UNAUTHENTICATED ("GitHub is temporarily limiting some unauthenticated
-        # downloads", 2026-09-01..03) even with the auto GITHUB_TOKEN rewritten into the
-        # URL. The REST tarball endpoint honors the token, and nothing downstream needs
-        # the submodule's .git (it is a plain pnpm workspace member). The commit is the
-        # gitlink pinned in this checkout, so the tree is exactly what a submodule init
-        # would produce. SUBMODULE_TOKEN is the fallback if the repo ever goes private.
-        env:
-          GH_TOKEN: ${{ secrets.SUBMODULE_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          sha=$(git rev-parse HEAD:web/pcbjam-shared)
-          mkdir -p web/pcbjam-shared
-          curl -fsSL --retry 5 --retry-all-errors -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/PCBJam/pcbjam-shared/tarball/${sha}" \
-            | tar xz --strip-components=1 -C web/pcbjam-shared
-          test -f web/pcbjam-shared/package.json
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - name: Download WASM output
-        uses: actions/download-artifact@v4
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: wasm-output
           path: output
-      - name: Publish WASM to CDN
-        run: >
-          node scripts/deploy/publish-wasm.mjs --tag "${{ needs.meta.outputs.tag }}"
-          --src output --driver r2 --bucket "$BUCKET" --remote --compress br --quality 11
-
-  # 3) Build the standalone pinned to this tag's manifest + libs, deploy to Pages.
-  deploy-demo:
-    needs: [meta, publish-wasm]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: false
-      - name: Init pcbjam-shared submodule
-        # Not `git submodule update`: GitHub throttles that clone from the shared runner
-        # egress as UNAUTHENTICATED ("GitHub is temporarily limiting some unauthenticated
-        # downloads", 2026-09-01..03) even with the auto GITHUB_TOKEN rewritten into the
-        # URL. The REST tarball endpoint honors the token, and nothing downstream needs
-        # the submodule's .git (it is a plain pnpm workspace member). The commit is the
-        # gitlink pinned in this checkout, so the tree is exactly what a submodule init
-        # would produce. SUBMODULE_TOKEN is the fallback if the repo ever goes private.
+      - name: Assemble immutable release assets
+        run: python3 scripts/release/package_kicad_wasm.py output release
+      - name: Refuse a release rerun with different bytes
         env:
-          GH_TOKEN: ${{ secrets.SUBMODULE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sha=$(git rev-parse HEAD:web/pcbjam-shared)
-          mkdir -p web/pcbjam-shared
-          curl -fsSL --retry 5 --retry-all-errors -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/PCBJam/pcbjam-shared/tarball/${sha}" \
-            | tar xz --strip-components=1 -C web/pcbjam-shared
-          test -f web/pcbjam-shared/package.json
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.33.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install standalone workspace
-        run: pnpm --dir web install --frozen-lockfile
-
-      # Read-only example gallery (tiny; content/<tag>/).
-      - name: Publish content gallery
-        run: >
-          node scripts/deploy/publish-content.mjs --tag "${{ needs.meta.outputs.tag }}"
-          --gallery deploy/demo/gallery.json --driver r2 --bucket "$BUCKET" --remote
-
-      # Standalone pinned to the CDN + this tag's manifest-<tag>.json (written by
-      # publish-wasm above) + the full library set at libs/kicad/$LIB_TAG.
-      - name: Build demo
-        # Plausible: the shared pa- script covering all pcbjam properties
-        # (one dashboard, segment by hostname).
-        run: >
-          node scripts/deploy/build-demo.mjs --tag "${{ needs.meta.outputs.tag }}"
-          --cdn "$CDN" --lib-tag "$LIB_TAG"
-          ${MODELS_TAG:+--models-tag "$MODELS_TAG"}
-          --plausible "https://plausible.io/js/pa-KjNS9YmidydULZTstsjRg.js"
-          ${ERRORS_DSN:+--errors-dsn "$ERRORS_DSN" --errors-env demo}
-
-      - name: Ensure Pages project exists
-        run: >
-          npx --yes wrangler@4 pages project create "$PAGES_PROJECT"
-          --production-branch "$PAGES_PROD_BRANCH"
-          || echo "pages project create skipped (already exists)"
-
-      - name: Deploy to Cloudflare Pages
-        run: >
-          npx --yes wrangler@4 pages deploy web/standalone/dist
-          --project-name "$PAGES_PROJECT"
-          --branch "$PAGES_PROD_BRANCH"
-          --commit-dirty=true
-
-  # 4) Backed editor (editor.pcbjam.com): the SAME standalone, built in remote
-  #    mode against the closed API (pcbjam-private's api.pcbjam.com) instead of
-  #    the static gallery. Reuses this tag's CDN WASM manifest — no extra WASM
-  #    work. Runs in parallel with deploy-demo (separate runner, own dist/).
-  deploy-editor:
-    needs: [meta, publish-wasm]
-    runs-on: ubuntu-latest
-    env:
-      RELEASE_TAG: ${{ needs.meta.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: false
-      - name: Init pcbjam-shared submodule
-        # Not `git submodule update`: GitHub throttles that clone from the shared runner
-        # egress as UNAUTHENTICATED ("GitHub is temporarily limiting some unauthenticated
-        # downloads", 2026-09-01..03) even with the auto GITHUB_TOKEN rewritten into the
-        # URL. The REST tarball endpoint honors the token, and nothing downstream needs
-        # the submodule's .git (it is a plain pnpm workspace member). The commit is the
-        # gitlink pinned in this checkout, so the tree is exactly what a submodule init
-        # would produce. SUBMODULE_TOKEN is the fallback if the repo ever goes private.
-        env:
-          GH_TOKEN: ${{ secrets.SUBMODULE_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          sha=$(git rev-parse HEAD:web/pcbjam-shared)
-          mkdir -p web/pcbjam-shared
-          curl -fsSL --retry 5 --retry-all-errors -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/PCBJam/pcbjam-shared/tarball/${sha}" \
-            | tar xz --strip-components=1 -C web/pcbjam-shared
-          test -f web/pcbjam-shared/package.json
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.33.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install standalone workspace
-        run: pnpm --dir web install --frozen-lockfile
-
-      # --plausible: the shared pa- script covering all pcbjam properties
-      # (one dashboard, segment by hostname).
-      # --models-source registry: 3D models come from the closed registry's
-      # kind='model3d' origin libs (chunked packages3D ingest, libs/0016), not
-      # the CDN snapshot — MODELS_TAG only feeds the demo build above.
-      - name: Build editor (remote mode)
-        run: >
-          node scripts/deploy/build-editor.mjs --tag "$RELEASE_TAG"
-          --cdn "$CDN" --api-base "$EDITOR_API_BASE" --app-base "$EDITOR_APP_BASE"
-          --plausible "https://plausible.io/js/pa-KjNS9YmidydULZTstsjRg.js"
-          ${ERRORS_DSN:+--errors-dsn "$ERRORS_DSN" --errors-env production}
-          --models-source registry
-
-      - name: Ensure Pages project exists
-        run: >
-          npx --yes wrangler@4 pages project create "$EDITOR_PAGES_PROJECT"
-          --production-branch "$PAGES_PROD_BRANCH"
-          || echo "pages project create skipped (already exists)"
-
-      - name: Deploy to Cloudflare Pages
-        run: >
-          npx --yes wrangler@4 pages deploy web/standalone/dist
-          --project-name "$EDITOR_PAGES_PROJECT"
-          --branch "$PAGES_PROD_BRANCH"
-          --commit-dirty=true
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            mkdir existing
+            gh release download "$GITHUB_REF_NAME" --dir existing
+            (cd existing && sha256sum -c SHA256SUMS)
+            cmp release/kicad-wasm.zip existing/kicad-wasm.zip
+            cmp release/BUILD-METADATA.txt existing/BUILD-METADATA.txt
+            cmp release/SOURCE-LICENSES.txt existing/SOURCE-LICENSES.txt
+            echo "Release already exists with identical bytes; nothing to overwrite."
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "Diode KiCad WASM browser runtime. Verify assets with SHA256SUMS; corresponding source is the tagged repository and pinned submodules recorded in BUILD-METADATA.txt."

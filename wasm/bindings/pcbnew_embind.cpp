@@ -14,6 +14,7 @@
 #include <emscripten/bind.h>
 #include <board.h>
 #include <board_commit.h>
+#include <connectivity/connectivity_data.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <board_item.h>
 #include <footprint.h>
@@ -33,8 +34,10 @@
 #include <kicad_clipboard.h>
 #include <io/kicad/kicad_io_utils.h>
 #include <richio.h>
+#include <dsnlexer.h>
 #include <tools/pcb_selection.h>
 #include <tools/pcb_selection_tool.h>
+#include <router/router_tool.h>
 #include <settings/color_settings.h>
 #include <widgets/appearance_controls.h>
 #include <geometry/shape_poly_set.h>
@@ -416,6 +419,11 @@ std::string blobForItem( BOARD* aBoard, BOARD_ITEM* aItem )
     if( aItem->Type() == PCB_FIELD_T )
         return "";
 
+    // The file writer intentionally omits empty groups.
+    if( aItem->Type() == PCB_GROUP_T
+        && static_cast<PCB_GROUP*>( aItem )->GetItems().empty() )
+        return "";
+
     if( aItem->Type() == PCB_FOOTPRINT_T )
     {
         const FOOTPRINT* src = static_cast<const FOOTPRINT*>( aItem );
@@ -550,12 +558,16 @@ BOARD_ITEM* makeFromBlob( BOARD& aBoard, const std::string& aBlobIn )
 
     if( found )
     {
-        clip->Remove( found );              // detach so clip's dtor doesn't delete it
-        // Reparent onto the REAL board before clip is freed: the item's m_parent still points at
-        // clip, and commit.Push/saveCopyInUndoList dereferences GetParent() — a dangling pointer
-        // here is what trapped via add ("index out of bounds") and tripped the zone undo assert.
-        found->SetParent( &aBoard );
-        found->SetParentGroup( nullptr );
+        // Cloning while the envelope is alive avoids retaining pointers into its
+        // component-class storage. Footprints cache one such pointer explicitly.
+        BOARD_ITEM* clone = static_cast<BOARD_ITEM*>( found->Clone() );
+
+        if( clone->Type() == PCB_FOOTPRINT_T )
+            static_cast<FOOTPRINT*>( clone )->SetStaticComponentClass( nullptr );
+
+        clone->SetParent( &aBoard );
+        clone->SetParentGroup( nullptr );
+        found = clone;
     }
 
     delete clip;
@@ -836,12 +848,34 @@ void rebaselineTouched( BOARD* aBoard, const std::vector<std::string>& aIds )
 // Diff the current (settled, post-cleanup) model against the baseline and broadcast the change.
 void flushDiff()
 {
-    g_flushScheduled = false;
+    // The host-owned history mode pulls snapshots under its render lock.
+    // Do not serialize here: even an initially idle tool can start while
+    // a serializer suspends. Leave dirtiness for the next locked capture.
+    if( PCBJAM_COLLAB_HISTORY::IsEnabled() )
+    {
+        g_flushScheduled = false;
+        return;
+    }
 
     PCB_EDIT_FRAME* fr = pcbFrame();
 
     if( !fr )
+    {
+        g_flushScheduled = false;
         return;
+    }
+
+    // Never serialize a live preview or race an externally locked apply.
+    // Keep dirty roots; the host's next locked snapshot captures settled edits.
+    if( pcbjam_collab::lockHeld() || wxWasmSuspensionDepth != 0
+        || !fr->IsEnabled() || !fr->CanAcceptApiCommands() || !fr->ToolStackIsEmpty()
+        || !fr->GetToolManager()->IsCollabMutationSafe() )
+    {
+        g_flushScheduled = false;
+        return;
+    }
+
+    g_flushScheduled = false;
 
     BOARD*                      board = fr->GetBoard();
     std::map<std::string, json> cur   = snapshotByUuid( *board );
@@ -1107,6 +1141,7 @@ BOARD* ensureBridge()
 // COROUTINE (see kicadCollabApply).
 void doApply( PCB_EDIT_FRAME* aFrame, const json& aDelta )
 {
+    pcbjam_collab::clearNativeHistory( aFrame );
     BOARD* board = aFrame->GetBoard();
 
     s_applyingRemote = true;
@@ -1184,14 +1219,223 @@ void doApply( PCB_EDIT_FRAME* aFrame, const json& aDelta )
     s_applyingRemote = false;
 }
 
+// All snapshots and reconciliation execute at a parked tool checkpoint, with
+// input excluded. Pending COMMIT images distinguish durable edits from previews.
+std::map<std::string, BOARD_ITEM*> collabRoots( BOARD* board, bool committed )
+{
+    std::map<std::string, BOARD_ITEM*> roots;
+    for( FOOTPRINT* item : board->Footprints() ) roots[toUtf8( item->m_Uuid.AsString() )] = item;
+    for( PCB_TRACK* item : board->Tracks() ) roots[toUtf8( item->m_Uuid.AsString() )] = item;
+    for( ZONE* item : board->Zones() ) roots[toUtf8( item->m_Uuid.AsString() )] = item;
+    for( BOARD_ITEM* item : board->Drawings() ) roots[toUtf8( item->m_Uuid.AsString() )] = item;
+    for( PCB_GROUP* item : board->Groups() ) roots[toUtf8( item->m_Uuid.AsString() )] = item;
+
+    if( committed )
+    {
+        // Reverse nesting: the oldest rollback image is the committed base.
+        auto& pending = COMMIT::PendingCommits();
+        for( auto it = pending.rbegin(); it != pending.rend(); ++it )
+        {
+            auto* commit = dynamic_cast<BOARD_COMMIT*>( *it );
+            if( !commit || commit->GetBoard() != board )
+                continue;
+            commit->VisitPending( [&]( EDA_ITEM* item, EDA_ITEM*& copy, CHANGE_TYPE type )
+            {
+                if( !item || !item->IsBOARD_ITEM() ) return;
+                auto id = toUtf8( item->m_Uuid.AsString() );
+                if( ( type & CHT_TYPE ) == CHT_ADD )
+                    roots.erase( id );
+                else if( copy && copy->IsBOARD_ITEM() )
+                    roots[id] = static_cast<BOARD_ITEM*>( copy );
+            } );
+        }
+    }
+    return roots;
+}
+
+json collabItems( BOARD* board, bool committed, const std::set<std::string>* selected = nullptr )
+{
+    json added = json::array();
+    for( const auto& [id, item] : collabRoots( board, committed ) )
+    {
+        if( selected && !selected->count( id ) ) continue;
+        std::string sexpr = blobForItem( board, item );
+        if( !sexpr.empty() )
+            added.push_back( json{ { "sexpr", sexpr }, { "parent", nullptr } } );
+    }
+    return json{ { "added", added }, { "changed", json::array() }, { "removed", json::array() } };
+}
+
+std::unique_ptr<BOARD_ITEM> collabParseItem( BOARD* board, const json& wire )
+{
+    std::string text = wire.at( "sexpr" ).get<std::string>();
+    auto start = text.find_first_not_of( " \t\r\n" );
+    if( start == std::string::npos ) throw std::runtime_error( "Empty collaboration item" );
+    text.erase( 0, start );
+    if( text.rfind( "(kicad_pcb", 0 ) != 0 && text.rfind( "(footprint", 0 ) != 0 )
+        text = wrapInBoardEnvelope( *board, text );
+    std::unique_ptr<BOARD_ITEM> item( makeFromBlob( *board, text ) );
+    if( !item ) throw std::runtime_error( "Invalid collaboration item" );
+    return item;
+}
+
+// Rebase rollback images before touching the working board. Escape then reveals
+// the newest committed state, not the state when the gesture started.
+void collabRebaseCopies( BOARD* board, const json& wire )
+{
+    for( const auto& key : { "added", "changed" } )
+    {
+        for( const auto& value : wire.value( key, json::array() ) )
+        {
+            auto target = collabParseItem( board, value );
+            for( COMMIT* pending : COMMIT::PendingCommits() )
+            {
+                auto* commit = dynamic_cast<BOARD_COMMIT*>( pending );
+                if( !commit || commit->GetBoard() != board ) continue;
+                commit->VisitPending( [&]( EDA_ITEM* item, EDA_ITEM*& copy, CHANGE_TYPE type )
+                {
+                    if( copy && item && item->m_Uuid == target->m_Uuid )
+                    {
+                        delete copy;
+                        copy = target->Clone();
+                    }
+                } );
+            }
+        }
+    }
+}
+
+// A one-item envelope cannot resolve references to other board roots. Keep
+// group member UUIDs until the entire batch is installed, then resolve them on
+// the live board. KiCad still parses every group's own properties.
+std::vector<KIID> collabGroupMembers( const std::string& sexpr )
+{
+    DSNLEXER lexer( sexpr, wxT( "collaboration group" ) );
+    std::vector<KIID> ids;
+    int previous = DSN_NONE;
+    for( int token = lexer.NextTok(); token != DSN_EOF; token = lexer.NextTok() )
+    {
+        if( previous == DSN_LEFT && token == DSN_SYMBOL
+            && std::string( lexer.CurText() ) == "members" )
+        {
+            while( lexer.NextTok() != DSN_RIGHT )
+            {
+                if( lexer.CurTok() == DSN_EOF )
+                    throw std::runtime_error( "Unterminated group members" );
+                ids.emplace_back( std::string( lexer.CurText() ) );
+            }
+            break;
+        }
+        previous = token;
+    }
+    return ids;
+}
+
+void collabUnlinkGroup( PCB_GROUP* group )
+{
+    for( EDA_ITEM* member : group->GetItems() )
+        if( member->GetParentGroup() == group ) member->SetParentGroup( nullptr );
+    group->GetItems().clear();
+}
+
+void doReconcileItems( PCB_EDIT_FRAME* frame, const json& wire )
+{
+    BOARD* board = frame->GetBoard();
+    KIGFX::VIEW* view = frame->GetToolManager()->GetView();
+    auto connectivity = board->GetConnectivity();
+    std::vector<BOARD_ITEM*> added, changed, removed;
+    std::vector<std::unique_ptr<BOARD_ITEM>> garbage;
+    std::vector<std::pair<PCB_GROUP*, std::vector<KIID>>> groups;
+
+    auto* router = frame->GetToolManager()->GetTool<ROUTER_TOOL>();
+    if( router ) router->PrepareCollab();
+    collabRebaseCopies( board, wire.at( "committed" ) );
+    s_applyingRemote = true;
+    for( const auto& id : wire.value( "removed", json::array() ) )
+    {
+        if( auto* item = board->ResolveItem( KIID( id.get<std::string>() ), true ) )
+        {
+            view->Remove( item );
+            connectivity->Remove( item );
+            if( item->Type() == PCB_GROUP_T )
+                collabUnlinkGroup( static_cast<PCB_GROUP*>( item ) );
+            board->Remove( item, REMOVE_MODE::BULK );
+            removed.push_back( item );
+            garbage.emplace_back( item );
+        }
+    }
+    for( const auto& key : { "added", "changed" } )
+    {
+        for( const auto& value : wire.value( key, json::array() ) )
+        {
+            auto target = collabParseItem( board, value );
+            auto* existing = board->ResolveItem( target->m_Uuid, true );
+            BOARD_ITEM* live = existing ? existing : target.get();
+            if( existing )
+            {
+                if( existing->Type() != target->Type() )
+                    throw std::runtime_error( "Collaboration item type changed" );
+                int flags = existing->GetFlags();
+                view->Remove( existing );
+                connectivity->Remove( existing );
+                // PCB_GROUP::swapData reassigns former members to the image.
+                // That image is freed below, unlike an ordinary undo image.
+                if( existing->Type() == PCB_GROUP_T )
+                    collabUnlinkGroup( static_cast<PCB_GROUP*>( existing ) );
+                existing->SwapItemData( target.get() );
+                existing->ClearFlags();
+                existing->SetFlags( flags );
+                view->Add( existing );
+                connectivity->Add( existing );
+                changed.push_back( existing );
+                garbage.push_back( std::move( target ) );
+            }
+            else
+            {
+                auto* item = target.release();
+                board->Add( item, ADD_MODE::BULK_INSERT );
+                view->Add( item );
+                connectivity->Add( item );
+                added.push_back( item );
+            }
+            if( live->Type() == PCB_GROUP_T )
+                groups.emplace_back( static_cast<PCB_GROUP*>( live ),
+                                     collabGroupMembers( value.at( "sexpr" ).get<std::string>() ) );
+        }
+    }
+    for( auto& [group, ids] : groups )
+    {
+        for( const KIID& id : ids )
+            if( auto* member = board->ResolveItem( id, true ) ) group->AddItem( member );
+        view->Update( group );
+    }
+    board->IncrementTimeStamp();
+    board->OnItemsCompositeUpdate( added, removed, changed );
+    connectivity->RecalculateRatsnest();
+    board->OnRatsnestChanged();
+    if( router ) router->FinishCollab();
+    view->MarkDirty();
+    frame->GetCanvas()->Refresh();
+    if( !PCBJAM_COLLAB_HISTORY::IsEnabled() ) rebaseline();
+    s_applyingRemote = false;
+}
+
 // v2 items apply: removed by uuid; added/changed are an idempotent per-item upsert —
 // parse the blob (wrapping bare non-footprint payloads in a live-board envelope),
 // then replace any existing item sharing the parsed uuid. Runs inside the apply
 // COROUTINE (see kicadCollabApplyItems), via BOARD_COMMIT like every remote op.
 void doApplyItems( PCB_EDIT_FRAME* aFrame, const json& aWire )
 {
+    if( aWire.contains( "committed" ) )
+    {
+        doReconcileItems( aFrame, aWire );
+        return;
+    }
+
     BOARD* board = aFrame->GetBoard();
 
+    // Existing undo/redo pickers may own or reference roots replaced below.
+    pcbjam_collab::clearNativeHistory( aFrame );
     s_applyingRemote = true;
 
     BOARD_COMMIT commit( aFrame );
@@ -1510,6 +1754,9 @@ void schedulePresenceDocChanged()
 // commit/listener state (eeschema 0007, drift-trio #10).
 void pcbCollabApply( std::string aJson )
 {
+    if( !pcbjam_collab::lockHeld() )
+        return;
+
     // Open-in-flight guard (open_gate.h): never touch the model while a
     // kicadOpenFile chain is suspended mid-load — commits/virtuals would walk
     // a half-built board mid-mutation.
@@ -1535,6 +1782,9 @@ void pcbCollabApply( std::string aJson )
 // (the blob parse + commit must run where native edits run — see above).
 void pcbCollabApplyItems( std::string aJson )
 {
+    if( !pcbjam_collab::lockHeld() )
+        return;
+
     if( pcbjam_open::busy() ) // open in flight (open_gate.h) — see pcbCollabApply
         return;
 
@@ -1556,6 +1806,9 @@ void pcbCollabApplyItems( std::string aJson )
 // change listener on first call.
 std::string pcbCollabSnapshot()
 {
+    if( !pcbjam_collab::lockHeld() )
+        return "{}";
+
     if( pcbjam_open::busy() ) // open in flight (open_gate.h) — see pcbCollabApply
         return json{ { "added", json::array() }, { "changed", json::array() },
                      { "removed", json::array() } }.dump();
@@ -1583,34 +1836,79 @@ std::string pcbCollabSnapshot()
 // listener + rebaselines exactly like kicadCollabSnapshot.
 std::string pcbCollabSnapshotItems()
 {
+    if( !pcbjam_collab::lockHeld() )
+        return "{}";
+
     if( pcbjam_open::busy() ) // open in flight (open_gate.h) — see pcbCollabApply
         return json{ { "added", json::array() }, { "changed", json::array() },
                      { "removed", json::array() } }.dump();
 
     BOARD* board = ensureBridge();
 
-    json added = json::array();
-
-    if( board )
+    static BOARD* cachedBoard = nullptr;
+    static int cachedStamp = -1;
+    static std::string cached;
+    if( !board ) return "{}";
+    if( board != cachedBoard || board->GetTimeStamp() != cachedStamp )
     {
-        auto push = [&]( BOARD_ITEM* item )
-        {
-            std::string sexpr = blobForItem( board, item );
-
-            if( !sexpr.empty() )    // P-5: never seed a hollow envelope
-                added.push_back( json{ { "sexpr", sexpr }, { "parent", nullptr } } );
-        };
-
-        for( FOOTPRINT* fp : board->Footprints() )  push( fp );
-        for( PCB_TRACK* t : board->Tracks() )       push( t );
-        for( ZONE* z : board->Zones() )             push( z );
-        for( BOARD_ITEM* d : board->Drawings() )    push( d );
+        cached = collabItems( board, true ).dump();
+        cachedBoard = board;
+        cachedStamp = board->GetTimeStamp();
     }
+    return cached;
+}
 
-    rebaseline();
 
-    return json{ { "added", added }, { "changed", json::array() },
-                 { "removed", json::array() } }.dump();
+std::string pcbCollabSnapshotState( std::string aDelta )
+{
+    if( !pcbjam_collab::lockHeld() || pcbjam_open::busy() ) return "{}";
+    BOARD* board = ensureBridge();
+    if( !board ) return "{}";
+    json delta = json::parse( aDelta );
+    std::set<std::string> selected;
+    for( const auto& id : delta.value( "removed", json::array() ) )
+        selected.insert( id.get<std::string>() );
+    for( const auto& key : { "added", "changed" } )
+        for( const auto& item : delta.value( key, json::array() ) )
+            selected.insert( toUtf8( collabParseItem( board, item )->m_Uuid.AsString() ) );
+    return json{ { "committed", collabItems( board, true, &selected ).dump() },
+                 { "working", collabItems( board, false, &selected ).dump() } }.dump();
+}
+
+// Deleting a gesture prerequisite cancels that gesture before freeing objects.
+// Cancel is explicit (not ShutdownTool, whose null Wait can commit a Move).
+void pcbCollabPrepareItems( std::string text )
+{
+    if( !pcbjam_collab::lockHeld() ) return;
+    PCB_EDIT_FRAME* fr = pcbFrame();
+    if( !fr ) return;
+    json wire = json::parse( text );
+    pcbjam_collab::runOnCoroutine( fr, [fr, wire]()
+    {
+        bool destructive = !wire.value( "removed", json::array() ).empty();
+        for( const auto& value : wire.value( "changed", json::array() ) )
+        {
+            auto target = collabParseItem( fr->GetBoard(), value );
+            auto* existing = fr->GetBoard()->ResolveItem( target->m_Uuid, true );
+            if( !existing ) continue;
+            std::set<KIID> children;
+            target->RunOnChildren( [&]( BOARD_ITEM* item ) { children.insert( item->m_Uuid ); },
+                                   RECURSE_MODE::RECURSE );
+            existing->RunOnChildren( [&]( BOARD_ITEM* item )
+            {
+                if( !children.count( item->m_Uuid ) ) destructive = true;
+            }, RECURSE_MODE::RECURSE );
+            if( existing->Type() != target->Type() ) destructive = true;
+        }
+        if( destructive )
+        {
+            // The JS capture-phase barrier still excludes external input.
+            PCBJAM_REMOTE_LOCK::SetRenderLocked( false );
+            fr->GetToolManager()->ProcessEvent( TOOL_EVENT( TC_COMMAND, TA_CANCEL_TOOL ) );
+            fr->GetToolManager()->RunAction( ACTIONS::selectionClear );
+            PCBJAM_REMOTE_LOCK::SetRenderLocked( true );
+        }
+    } );
 }
 
 
@@ -1641,6 +1939,13 @@ extern "C" void kicadCollabOnSave( const char* aPath )
 bool pcbEditorActive()
 {
     return pcbFrame() != nullptr;
+}
+
+bool pcbCollabCanLock()
+{
+    PCB_EDIT_FRAME* fr = pcbFrame();
+    auto* router = fr ? fr->GetToolManager()->GetTool<ROUTER_TOOL>() : nullptr;
+    return fr && ( !router || router->CanCollabCheckpoint() );
 }
 
 
@@ -1771,6 +2076,11 @@ void pcbSetColorTheme( std::string aTheme )
 void pcbSetDarkChrome( bool aDark )
 {
     pcbjam_theme::setDarkChromeFlag( aDark );
+}
+
+void pcbRefreshChromeTheme()
+{
+    pcbjam_theme::refreshChromeTheme( pcbFrame() );
 }
 
 // ── Layer bridge (viewer-panels) ─────────────────────────────────────────────
@@ -2215,9 +2525,24 @@ bool pcbCollabTestUndo()
     return pcbjam_collab::testUndo( pcbFrame() );
 }
 
+bool pcbCollabSetHistoryMode( bool aEnabled )
+{
+    return pcbjam_collab::setHistoryMode( pcbFrame(), aEnabled );
+}
+
+bool pcbCollabTestRedo()
+{
+    return pcbjam_collab::testRedo( pcbFrame() );
+}
+
 int pcbCollabTestUndoDepth()
 {
     return pcbjam_collab::testUndoDepth( pcbFrame() );
+}
+
+int pcbCollabTestRedoDepth()
+{
+    return pcbjam_collab::testRedoDepth( pcbFrame() );
 }
 
 bool pcbCollabTestRemoveItem( std::string aId )
@@ -2941,6 +3266,9 @@ EMSCRIPTEN_BINDINGS(pcbnew) {
     function("kicadCollabTestRemoveItem", &pcbCollabTestRemoveItem);
     function("kicadCollabTestUndo", &pcbCollabTestUndo);
     function("kicadCollabTestUndoDepth", &pcbCollabTestUndoDepth);
+    function("kicadCollabSetHistoryMode", &pcbCollabSetHistoryMode);
+    function("kicadCollabTestRedo", &pcbCollabTestRedo);
+    function("kicadCollabTestRedoDepth", &pcbCollabTestRedoDepth);
     function("kicadCollabTestRotateItem", &pcbCollabTestRotateItem);
     // Presence (collab-presence 0002) — shared names; eeschema's counterparts land
     // with 0003 (the merged image dispatches pcb-only until then).

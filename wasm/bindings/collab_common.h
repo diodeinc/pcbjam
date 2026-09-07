@@ -19,13 +19,39 @@
 #include <wx/event.h>
 #include <wx/string.h>
 #include <eda_base_frame.h>
+#include <pcbjam_collab_history.h>
+#include <pcbjam_remote_lock.h>
 #include <tool/actions.h>
 #include <tool/coroutine.h>
 #include <tool/tool_manager.h>
+#include <wx/wasm/private/dispatch.h>
 
 namespace pcbjam_collab {
 
 inline std::string toUtf8( const wxString& s ) { return std::string( s.utf8_str() ); }
+
+/** Dispose every native history entry through the positive-count path. */
+inline void clearNativeHistory( EDA_BASE_FRAME* aFrame )
+{
+    if( !aFrame )
+        return;
+
+    aFrame->ClearUndoORRedoList( KIWAY_PLAYER::UNDO_LIST, aFrame->GetUndoCommandCount() );
+    aFrame->ClearUndoORRedoList( KIWAY_PLAYER::REDO_LIST, aFrame->GetRedoCommandCount() );
+}
+
+/** Enable Yjs-owned history and synchronously remove all stale native entries. */
+inline bool setHistoryMode( EDA_BASE_FRAME* aFrame, bool aEnabled )
+{
+    if( !aFrame )
+        return false;
+
+    if( aEnabled )
+        clearNativeHistory( aFrame );
+
+    PCBJAM_COLLAB_HISTORY::SetEnabled( aEnabled );
+    return true;
+}
 
 /**
  * Run a body on the editor's main loop AND inside a COROUTINE — the exact
@@ -58,6 +84,45 @@ inline bool& applyBusy()
 {
     static bool busy = false;
     return busy;
+}
+
+inline bool& lockHeld()
+{
+    static bool held = false;
+    return held;
+}
+
+inline bool& unlockPending()
+{
+    static bool pending = false;
+    return pending;
+}
+
+inline bool basicTryLock( bool aOpenBusy )
+{
+    if( lockHeld() || aOpenBusy || applyBusy() || !applyQueue().empty()
+        || wxWasmDispatchDepth != 0 || wxWasmSuspensionDepth != 0 )
+    {
+        return false;
+    }
+
+    lockHeld() = true;
+    unlockPending() = false;
+    PCBJAM_REMOTE_LOCK::SetRenderLocked( true );
+    return true;
+}
+
+inline void unlock()
+{
+    if( applyBusy() || !applyQueue().empty() )
+    {
+        unlockPending() = true;
+        return;
+    }
+
+    lockHeld() = false;
+    unlockPending() = false;
+    PCBJAM_REMOTE_LOCK::SetRenderLocked( false );
 }
 
 /* The in-flight body. HEAP-allocated and pinned for the body's whole life:
@@ -145,10 +210,28 @@ inline void drainApplies()
             try
             {
                 ( *sl.body )();
+
+                // BOARD_COMMIT posts model-change notifications to the tool
+                // manager. Unlike a normal input dispatch, this queue body has
+                // no outer ProcessEvent to drain them. Settle them while input
+                // is still excluded; otherwise an idle observer needs a keypress
+                // before its next render lock can be acquired.
+                if( lockHeld() )
+                {
+                    if( auto* frame = dynamic_cast<EDA_BASE_FRAME*>( applyHandler() ) )
+                        frame->GetToolManager()->ProcessEvent( TOOL_EVENT( TC_MESSAGE, TA_NONE ) );
+                }
             }
             catch( ... )
             {
                 EM_ASM( { console.error( '[pcbjam collab] apply body threw — slot released' ); } );
+                // Never acknowledge a partially applied model as synchronized.
+                EM_ASM( {
+                    queueMicrotask( () => {
+                        if( window.kicadCollab && window.kicadCollab.onFatal )
+                            window.kicadCollab.onFatal( new Error( 'KiCad reconciliation failed' ) );
+                    } );
+                } );
             }
 
             sl.done = true;
@@ -174,6 +257,9 @@ inline void drainApplies()
 
         reapApply();
     }
+
+    if( unlockPending() )
+        unlock();
 }
 
 /** Test/diagnostic probe (P-1): is the apply slot busy and how many bodies wait behind it.
@@ -278,10 +364,24 @@ inline bool testUndo( EDA_BASE_FRAME* aFrame )
     return true;
 }
 
+inline bool testRedo( EDA_BASE_FRAME* aFrame )
+{
+    if( !aFrame )
+        return false;
+
+    runOnCoroutine( aFrame, [aFrame]() { aFrame->GetToolManager()->RunAction( ACTIONS::redo ); } );
+    return true;
+}
+
 /** Local undo stack depth — remote applies must not grow it (miss 09). */
 inline int testUndoDepth( EDA_BASE_FRAME* aFrame )
 {
     return aFrame ? aFrame->GetUndoCommandCount() : -1;
+}
+
+inline int testRedoDepth( EDA_BASE_FRAME* aFrame )
+{
+    return aFrame ? aFrame->GetRedoCommandCount() : -1;
 }
 
 } // namespace pcbjam_collab

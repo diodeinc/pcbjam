@@ -586,12 +586,30 @@ void rebaselineTouched( SCH_EDIT_FRAME* aFrame, const std::vector<std::string>& 
 // Diff the current (settled, post-cleanup) model against the baseline and broadcast the change.
 void flushDiff()
 {
-    g_flushScheduled = false;
+    // Host-owned history captures settled changes under the render lock.
+    if( PCBJAM_COLLAB_HISTORY::IsEnabled() )
+    {
+        g_flushScheduled = false;
+        return;
+    }
 
     SCH_EDIT_FRAME* fr = schFrame();
 
     if( !fr )
+    {
+        g_flushScheduled = false;
         return;
+    }
+
+    if( pcbjam_collab::lockHeld() || wxWasmSuspensionDepth != 0
+        || !fr->IsEnabled() || !fr->CanAcceptApiCommands() || !fr->ToolStackIsEmpty()
+        || !fr->GetToolManager()->IsCollabMutationSafe() )
+    {
+        g_flushScheduled = false;
+        return;
+    }
+
+    g_flushScheduled = false;
 
     std::map<std::string, json> cur = snapshotByUuid( fr );
 
@@ -1024,6 +1042,7 @@ void moveItemTo( SCH_ITEM* aItem, const VECTOR2I& aNewPos )
 // it retired with that runtime.)
 void doApply( SCH_EDIT_FRAME* aFrame, const json& aDelta )
 {
+    pcbjam_collab::clearNativeHistory( aFrame );
     SCHEMATIC& sch = aFrame->Schematic();
 
     s_applyingRemote = true;
@@ -1152,6 +1171,7 @@ static bool applyTargetsShownSheet( SCH_EDIT_FRAME* aFrame, const json& aWire )
 
 void doApplyItems( SCH_EDIT_FRAME* aFrame, const json& aWire )
 {
+    pcbjam_collab::clearNativeHistory( aFrame );
     if( !applyTargetsShownSheet( aFrame, aWire ) )
         return;
 
@@ -1315,6 +1335,9 @@ void collabTestMove( SCH_EDIT_FRAME* aFrame, SCH_ITEM* aItem, SCH_SCREEN* aScree
 // run in. So defer the whole mutation there.
 void schCollabApply( std::string aJson )
 {
+    if( !pcbjam_collab::lockHeld() )
+        return;
+
     // Open-in-flight guard (open_gate.h): never touch the model while a
     // kicadOpenFile chain is suspended mid-load — commits/virtuals would walk
     // a half-built schematic mid-mutation.
@@ -1344,6 +1367,9 @@ void schCollabApply( std::string aJson )
 // registers the change listener on first call.
 std::string schCollabSnapshot()
 {
+    if( !pcbjam_collab::lockHeld() )
+        return "{}";
+
     if( pcbjam_open::busy() ) // open in flight (open_gate.h) — see schCollabApply
         return json{ { "added", json::array() }, { "changed", json::array() },
                      { "removed", json::array() } }.dump();
@@ -1364,6 +1390,9 @@ std::string schCollabSnapshot()
 // (LoadContent + SCH_COMMIT must run where native edits run).
 void schCollabApplyItems( std::string aJson )
 {
+    if( !pcbjam_collab::lockHeld() )
+        return;
+
     if( pcbjam_open::busy() ) // open in flight (open_gate.h) — see schCollabApply
         return;
 
@@ -1386,6 +1415,9 @@ void schCollabApplyItems( std::string aJson )
 // Registers the listener + rebaselines exactly like kicadCollabSnapshot.
 std::string schCollabSnapshotItems()
 {
+    if( !pcbjam_collab::lockHeld() )
+        return "{}";
+
     if( pcbjam_open::busy() ) // open in flight (open_gate.h) — see schCollabApply
         return json{ { "added", json::array() }, { "changed", json::array() },
                      { "removed", json::array() } }.dump();
@@ -1740,9 +1772,24 @@ bool schCollabTestUndo()
     return pcbjam_collab::testUndo( schFrame() );
 }
 
+bool schCollabSetHistoryMode( bool aEnabled )
+{
+    return pcbjam_collab::setHistoryMode( schFrame(), aEnabled );
+}
+
+bool schCollabTestRedo()
+{
+    return pcbjam_collab::testRedo( schFrame() );
+}
+
 int schCollabTestUndoDepth()
 {
     return pcbjam_collab::testUndoDepth( schFrame() );
+}
+
+int schCollabTestRedoDepth()
+{
+    return pcbjam_collab::testRedoDepth( schFrame() );
 }
 
 // Set a symbol's Value field text — bug 04: fields live inside the symbol (not
@@ -2073,6 +2120,11 @@ void schSetDarkChrome( bool aDark )
     pcbjam_theme::setDarkChromeFlag( aDark );
 }
 
+void schRefreshChromeTheme()
+{
+    pcbjam_theme::refreshChromeTheme( schFrame() );
+}
+
 // Tuner helper: a VARIED demo-selection set for the current sheet — smallest +
 // largest symbol and two bundles of wires (net-ish), mirroring pcbnew's
 // pcbCollabTestDemoSet so the style preview shows the range of shapes.
@@ -2360,6 +2412,14 @@ bool schEditorActive()
     return schFrame() != nullptr;
 }
 
+bool schCollabCanLock()
+{
+    SCH_EDIT_FRAME* fr = schFrame();
+    SCH_SELECTION_TOOL* selection =
+            fr ? fr->GetToolManager()->GetTool<SCH_SELECTION_TOOL>() : nullptr;
+    return selection && selection->GetSelection().Size() == 0;
+}
+
 
 void kicadSaveSchematic( std::string path )
 {
@@ -2497,6 +2557,9 @@ EMSCRIPTEN_BINDINGS(eeschema) {
     function("kicadCollabTestRotateItem", &schCollabTestRotateItem);
     function("kicadCollabTestUndo", &schCollabTestUndo);
     function("kicadCollabTestUndoDepth", &schCollabTestUndoDepth);
+    function("kicadCollabSetHistoryMode", &schCollabSetHistoryMode);
+    function("kicadCollabTestRedo", &schCollabTestRedo);
+    function("kicadCollabTestRedoDepth", &schCollabTestRedoDepth);
     // Presence (collab-presence 0003) — shared names with pcbnew's 0002 set.
     function("kicadCollabPresenceStart", &schCollabPresenceStart);
     function("kicadCollabSetRemote", &schCollabSetRemote);

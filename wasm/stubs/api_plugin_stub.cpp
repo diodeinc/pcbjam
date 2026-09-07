@@ -19,9 +19,10 @@ wxDEFINE_EVENT( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, wxCommandEvent );
 wxString KICAD_API_SERVER::s_logFileName;
 
 // KICAD_API_SERVER stub implementation
-KICAD_API_SERVER::KICAD_API_SERVER() :
+KICAD_API_SERVER::KICAD_API_SERVER( bool aAutoStart ) :
     m_readyToReply( false )
 {
+    (void) aAutoStart;
     // m_server intentionally left as nullptr - API server not available in WASM
 }
 

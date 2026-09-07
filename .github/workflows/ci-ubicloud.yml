@@ -1,7 +1,7 @@
-name: CI full build + e2e (Ubicloud)
+name: Diode CI (WASM build + e2e)
 
 # Main/PR gate: build all 6 KiCad WASM tools + run the wxWidgets + KiCad e2e
-# suites on a Ubicloud runner. The actual recipe lives in the reusable
+# suites on a Blacksmith runner. The actual recipe lives in the reusable
 # wasm-build.yml (the SINGLE build definition) — this is just the main/PR caller.
 # The tag release (release.yml) calls the same recipe with the same inputs and
 # then publishes, so the build can never diverge from what ships.
@@ -11,14 +11,12 @@ name: CI full build + e2e (Ubicloud)
 # (base-image / apt drift, a bad cache) bump .ci-cache-epoch; for a one-off
 # rebuild put [no-cache] or [rebuild-wasm] in the commit message / PR title.
 #
-# site/** is ignored: the Astro marketing site shares no build inputs with the
-# WASM tools and ships from its own deploy-site.yml. Without the exclusion every
-# blog post or landing-page tweak queued a full 6-tool build + both e2e suites —
-# and since concurrency never cancels, a multi-commit push stacked them up.
+# site/** is ignored: the upstream marketing site shares no build inputs with
+# the WASM tools and is not deployed by this fork.
 
 on:
   push:
-    branches: ["main", "ubicloud-ci"]
+    branches: ["main"]
     paths-ignore: ["docs/**", "**.md", "site/**"]
   pull_request:
     branches: ["main"]
@@ -33,17 +31,19 @@ on:
 
 concurrency:
   # Per-ref: a new push queues behind its own in-flight run (don't cancel).
-  group: ci-ubicloud-${{ github.ref }}
+  group: diode-ci-${{ github.ref }}
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   build:
     uses: ./.github/workflows/wasm-build.yml
-    # Pass repo secrets (DISCORD_WEBHOOK_URL) through to the reusable build so the
-    # post-test step can post the screenshot + perf report on push to main.
-    secrets: inherit
+    permissions:
+      contents: read
     with:
-      # 3D viewer ON so 3d-viewer.spec.ts has a viewer.
-      build_3d_viewer: "ON"
+      # This is the integration configuration validated for Diode's browser image.
+      build_3d_viewer: "OFF"
       run_tests: true
       no_cache: ${{ inputs.no_cache || false }}

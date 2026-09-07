@@ -618,6 +618,7 @@ compile_embind_tu() {
     _includes+=" -I${KICAD_DIR}/thirdparty/dynamic_bitset"
     _includes+=" -I${KICAD_DIR}/thirdparty/nanodbc"
     _includes+=" -I${KICAD_DIR}/thirdparty/picosha2"
+    _includes+=" -I${KICAD_DIR}/thirdparty/thread-pool"
     _includes+=" -I${KICAD_DIR}/thirdparty"
     # libcontext.h lives one level deeper; tool/coroutine.h does #include <libcontext.h>
     _includes+=" -I${KICAD_DIR}/thirdparty/libcontext"
