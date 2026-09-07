@@ -147,7 +147,9 @@ jobs:
         run: scripts/deps/check-pins.sh
 
       - name: Test release packaging
-        run: python3 -m unittest discover -s scripts/release -v
+        run: |
+          python3 -m unittest discover -s scripts/release -v
+          python3 scripts/test_ci_log.py
 
       # deps (sysroot + stamps) are only needed when we must COMPILE (cache miss).
       - name: Restore deps cache
@@ -199,7 +201,7 @@ jobs:
           JOBS=$(( $(nproc) < 32 ? $(nproc) : 32 ))
           export KICAD_DOCKER_CPUS="$JOBS" KICAD_DOCKER_MEM=110G
           echo "Compiling ${BUILD_APPS}, 3D viewer=${BUILD_3D_VIEWER}, -j $JOBS"
-          ./docker/build.sh "$BUILD_APPS" --compile-only --build-deps -j "$JOBS"
+          python3 scripts/ci-log.py logs/compile.log ./docker/build.sh "$BUILD_APPS" --compile-only --build-deps -j "$JOBS"
           ls -lh output/*.wasm
 
       # Preserve completed object compilations even when a later compile/link
@@ -253,7 +255,7 @@ jobs:
       - name: Host post-process (ENV merge shim)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
-          ./docker/build.sh "$BUILD_APPS" --postprocess-only
+          python3 scripts/ci-log.py logs/postprocess.log ./docker/build.sh "$BUILD_APPS" --postprocess-only
           ls -lh output/*.wasm
 
       - name: Save WASM output cache
@@ -397,7 +399,7 @@ jobs:
 
       - name: Build wxWidgets (wxUniversal WASM)
         if: inputs.run_tests
-        run: ./scripts/build-wx-wasm.sh
+        run: python3 scripts/ci-log.py logs/wx-build.log ./scripts/build-wx-wasm.sh
 
       # Built wx test apps (tests/apps): without this every run recompiles and
       # relinks all ~74 apps (~2m20s even 30-wide). Key = every build input: the
@@ -430,11 +432,11 @@ jobs:
 
       - name: Build wxWidgets test apps
         if: inputs.run_tests && steps.testapps-cache.outputs.cache-hit != 'true'
-        run: ./scripts/build-wasm-test.sh
+        run: python3 scripts/ci-log.py logs/wx-test-build.log ./scripts/build-wasm-test.sh
 
       - name: Build GAL WebGL test app
         if: inputs.run_tests
-        run: ./scripts/build-gal-webgl-test.sh
+        run: python3 scripts/ci-log.py logs/gal-build.log ./scripts/build-gal-webgl-test.sh
 
       # 3D renderer regression harness (tests/3d-regression): same recipe as GAL —
       # compiles real KiCad 3D-viewer TUs + the wasm/gl1 GL1->WebGL2 layer against
@@ -443,7 +445,7 @@ jobs:
       # when this app is missing.
       - name: Build 3D WebGL test app
         if: inputs.run_tests
-        run: ./scripts/build-3d-webgl-test.sh
+        run: python3 scripts/ci-log.py logs/3d-build.log ./scripts/build-3d-webgl-test.sh
 
       # The emsdk cache saves in the post-job phase; the downloads/ tarballs
       # (~340 MB) are spent after install — drop them so they never ride in the
@@ -549,7 +551,7 @@ jobs:
         working-directory: tests
         # BUILD_3D_VIEWER=OFF cannot satisfy the six full-viewer suites; all
         # other KiCad suites plus the independent 3D WebGL harness still run.
-        run: xvfb-run -a npm run test:e2e -- --workers=16 --grep-invert '3D viewer'
+        run: python3 ../scripts/ci-log.py ../logs/e2e.log xvfb-run -a npm run test:e2e -- --workers=16 --grep-invert '3D viewer'
 
       # The React web-app suite (web/) against the pnpm dev stack (frontend
       # :3048 + backend :3060, cold-started by Playwright's webServer on CI).
@@ -559,7 +561,7 @@ jobs:
         id: web_e2e
         if: inputs.run_tests && !cancelled() && steps.e2e.outcome != 'skipped'
         working-directory: tests
-        run: xvfb-run -a npm run test:web:ci -- --workers=16
+        run: python3 ../scripts/ci-log.py ../logs/web-e2e.log xvfb-run -a npm run test:web:ci -- --workers=16
 
       # Runtime-perf E2E (eeschema + pcbnew): measures the current build's
       # load / open+render / FPS and writes tests/test-results/perf-*.json.
@@ -569,7 +571,7 @@ jobs:
         if: inputs.run_tests && !cancelled() && steps.e2e.outcome != 'skipped'
         continue-on-error: true
         working-directory: tests
-        run: xvfb-run -a npm run test:perf
+        run: python3 ../scripts/ci-log.py ../logs/perf.log xvfb-run -a npm run test:perf
 
       # 3D renderer parity + browser-self regression (report-only). The wx e2e
       # step above captured the 47 scenario renders into
@@ -595,6 +597,7 @@ jobs:
         with:
           name: diode-e2e-${{ github.run_id }}
           path: |
+            logs/**
             tests/logs/**
             tests/test-results/**
             tests/pw-artifacts/**
