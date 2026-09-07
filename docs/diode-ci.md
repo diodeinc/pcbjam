@@ -31,12 +31,12 @@ checkout authentication to be arranged before enabling these workflows.
 
 ## Initial rollout order
 
-1. Publish the prepared `diode-wasm` branches to `diode-inc/kicad` on GitLab
-   and `diodeinc/wxWidgets` on GitHub before publishing the root gitlinks.
-   The wxWidgets branch includes PCBJam's WASM ancestry; the fork's default
-   `master` alone does not contain that port.
-2. Publish the root `diode-registry` branch and review it against `main`.
-   Run the Blacksmith build and browser tests before merging or tagging.
+1. Publish `diode-wasm` to `diode-inc/kicad` on GitLab and the tested WASM
+   port to `diodeinc/wxWidgets`' `master` before publishing the root gitlinks.
+   wxWidgets preserves both fork histories while adopting the tested WASM
+   source tree. KiCad's native desktop branch remains unchanged.
+2. Publish the root integration directly to `diodeinc/pcbjam`'s `main`.
+   Run the Blacksmith build and browser tests before tagging.
 3. After that build is green, publish a `diode-v*` release tag. Verify the
    downloaded release archive against its published `SHA256SUMS`.
 4. Update Registry's installer to pin that release URL and archive digest;

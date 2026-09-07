@@ -5,7 +5,7 @@
 [submodule "wxwidgets"]
 	path = wxwidgets
 	url = https://github.com/diodeinc/wxWidgets.git
-	branch = diode-wasm
+	branch = master
 [submodule "web/pcbjam-shared"]
 	path = web/pcbjam-shared
 	url = https://github.com/PCBJam/pcbjam-shared.git
