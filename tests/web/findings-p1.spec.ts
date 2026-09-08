@@ -85,7 +85,12 @@ test('P-1 standalone: fit lands after a keyboard rotate of a clicked footprint',
   // the new zoom (selection = []), so poll the real selection, not one click.
   const selection = (): Promise<string[]> =>
     page.evaluate(() => JSON.parse((window as unknown as W).Module.kicadCollabGetSelection()));
+  const popup = page.locator('.wx-menu-popup');
   const clicked = await expect.poll(async () => {
+    // A clarification menu parks the selection coroutine. More canvas clicks
+    // while it is open can queue another clarification after Escape, stranding
+    // the later snapshot inside a new popup. Let the fallback cancel this one.
+    if (await popup.count()) return false;
     const box = await glBox(page);
     const vp = await viewport(page);
     const sx = box.x + (fp.x - vp.cx) * vp.scale + vp.w / 2;
@@ -106,6 +111,7 @@ test('P-1 standalone: fit lands after a keyboard rotate of a clicked footprint',
     // selection does not dismiss it; close the unfinished click BEFORE choosing
     // the footprint, otherwise no legitimate snapshot checkpoint is available.
     await page.keyboard.press('Escape');
+    await expect(popup, 'clarification is dismissed before selecting the footprint').toHaveCount(0);
     const ok = await page.evaluate(
       (id) => (window as unknown as { Module: { kicadCollabTestSelectByUuid(u: string): boolean } }).Module.kicadCollabTestSelectByUuid(id),
       fp.id,
@@ -118,8 +124,7 @@ test('P-1 standalone: fit lands after a keyboard rotate of a clicked footprint',
   // Keyboard focus where a user's would be: the click above normally leaves it
   // on the canvas, but the CI web legs (both engines) saw `r` not reach the
   // tool at all (rotation unchanged, selection intact) — focus explicitly and
-  // give the hotkey a few tries before deciding the keyboard path is not
-  // exercisable on this runner.
+  // give the hotkey a few tries before failing the keyboard-path precondition.
   await page.locator('#canvas').focus();
   let rotated = false;
   for (let attempt = 0; attempt < 3 && !rotated; attempt++) {
@@ -129,10 +134,6 @@ test('P-1 standalone: fit lands after a keyboard rotate of a clicked footprint',
   const active = await page.evaluate(() => `${document.activeElement?.tagName}#${document.activeElement?.id}`);
   if (!rotated) {
     console.log(`[PROBE P-1 web] hotkey did not reach the tool: sel=${JSON.stringify(sel)} activeElement=${active} rotation=${await rotation(page, fp.id)}`);
-    // The keyboard-rotate → flushDiff → fit chain is gated on the kicad harness
-    // (findings-p.spec "keyboard rotate of a clicked footprint", green on CI);
-    // here the precondition itself is unavailable, not the P-1 property.
-    test.skip(true, 'keyboard hotkey did not reach the canvas on this runner (see PROBE)');
   }
   await page.keyboard.press('Escape');
   await page.waitForTimeout(1500); // eslint-disable-line -- let flushDiff + ysync run
