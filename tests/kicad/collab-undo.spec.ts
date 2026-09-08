@@ -196,12 +196,16 @@ test.describe("eeschema collab undo (miss 09: local-ops-only)", () => {
     expect(wire1Blob?.sexpr, "snapshot must carry WIRE1's blob").toBeTruthy();
 
     // Local op referencing WIRE1 → host history remembers its changed fields.
-    await collabEvaluate(page,
+    // SCH_LINE::Rotate is a no-op without endpoint-selection flags. Use an
+    // actual geometry edit, not a native no-op picker masquerading as history.
+    const before = await getPos(page, WIRE1);
+    expect(await collabEvaluate(page,
       (id) =>
-        (window as unknown as { Module: { kicadCollabTestRotateItem(i: string, d: number): boolean } })
-          .Module.kicadCollabTestRotateItem(id, 90),
+        (window as unknown as { Module: { kicadCollabTestMoveSchItem(i: string, dx: number, dy: number): boolean } })
+          .Module.kicadCollabTestMoveSchItem(id, 200000, 0),
       WIRE1,
-    );
+    )).toBe(true);
+    await expect.poll(() => getPos(page, WIRE1)).not.toBe(before);
     await expect.poll(() => undoDepth(page), { timeout: 15000, intervals: [250] }).toBe(1);
 
     // Remote upsert of WIRE1 (remove old object + re-add same uuid) frees the
@@ -232,12 +236,14 @@ test.describe("eeschema collab undo (miss 09: local-ops-only)", () => {
 
     await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems());
 
-    await collabEvaluate(page,
+    const before = await getPos(page, WIRE1);
+    expect(await collabEvaluate(page,
       (id) =>
-        (window as unknown as { Module: { kicadCollabTestRotateItem(i: string, d: number): boolean } })
-          .Module.kicadCollabTestRotateItem(id, 90),
+        (window as unknown as { Module: { kicadCollabTestMoveSchItem(i: string, dx: number, dy: number): boolean } })
+          .Module.kicadCollabTestMoveSchItem(id, 200000, 0),
       WIRE1,
-    );
+    )).toBe(true);
+    await expect.poll(() => getPos(page, WIRE1)).not.toBe(before);
     await expect.poll(() => undoDepth(page), { timeout: 15000, intervals: [250] }).toBe(1);
 
     await applyItems(page, { added: [], changed: [], removed: [WIRE1] });
