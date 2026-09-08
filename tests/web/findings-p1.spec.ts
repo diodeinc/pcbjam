@@ -102,6 +102,10 @@ test('P-1 standalone: fit lands after a keyboard rotate of a clicked footprint',
   // chain is): on a saturated runner the canvas can lag the viewport for longer
   // than the click budget, so fall back to the selection tool's own entry point.
   if (!clicked) {
+    // Overlapping tracks can leave a clarification menu open. A programmatic
+    // selection does not dismiss it; close the unfinished click BEFORE choosing
+    // the footprint, otherwise no legitimate snapshot checkpoint is available.
+    await page.keyboard.press('Escape');
     const ok = await page.evaluate(
       (id) => (window as unknown as { Module: { kicadCollabTestSelectByUuid(u: string): boolean } }).Module.kicadCollabTestSelectByUuid(id),
       fp.id,
