@@ -4,6 +4,7 @@ import pixelmatch from 'pixelmatch';
 import { test, expect } from './fixtures';
 import { hideCursor } from './utils/screenshot-compare';
 import { collabEvaluate } from './utils/collab-lock';
+import { captureLocalItems } from './utils/capture-items';
 
 /**
  * Eeschema "R" rotate regression (reported 2026-09-02, local wasm editor).
@@ -233,6 +234,30 @@ async function orientationShownInPanel(page: Page): Promise<string[]> {
 }
 
 test.describe('Eeschema rotate (R)', () => {
+    test('host undo and redo work while the rotated symbol stays selected', async ({ page }) => {
+        await bootWithSchematic(page);
+        await captureLocalItems(page, SAMPLE_SCH);
+        await page.keyboard.press('Control+a');
+        await page.keyboard.press('r');
+        // Real UI save proves the edit landed without clearing selection or
+        // invoking a forbidden native snapshot outside the checkpoint lock.
+        expect(await symbolRotationFromSave(page), 'R committed one rotation').toBe(90);
+        await page.keyboard.press('Control+z');
+        await expect.poll(() => symbolRotationFromSave(page), {
+            timeout: 15000,
+            message: 'host undo must not wait for Escape/deselection',
+        }).toBe(0);
+        await page.keyboard.press('Control+Shift+z');
+        await expect.poll(() => symbolRotationFromSave(page), {
+            timeout: 15000,
+            message: 'host redo restores the rotation without losing selection',
+        }).toBe(90);
+        const depth = await page.evaluate(() => (window as unknown as {
+            Module: { kicadCollabTestUndoDepth(): number };
+        }).Module.kicadCollabTestUndoDepth());
+        expect(depth, 'collaborative edits never retain native picker history').toBe(0);
+    });
+
     test('one R press on a selected symbol rotates it once and repaints the canvas', async ({
         page,
     }) => {
