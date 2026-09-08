@@ -163,12 +163,13 @@ export function createHostBinding(
     },
     async seed(seed: () => void) {
       if (destroyed) return;
-      // This is explicit opt-in: non-collaborative editors retain native undo.
-      if (!mod.kicadCollabSetHistoryMode(true)) throw new Error("KiCad history frame is not ready");
       await withCollabLock(mod, async () => {
         if (destroyed) return;
         await settle();
         if (destroyed) return;
+        // Opt-in disposes native picker history: it must be at the same safe
+        // checkpoint as seed/apply, never during a suspended local command.
+        if (!mod.kicadCollabSetHistoryMode(true)) throw new Error("KiCad history frame is not ready");
         seed(); // Existing file/layout seed and normalization, NOT a local-edit origin.
         const target = Y.encodeStateAsUpdate(doc);
         await settle();

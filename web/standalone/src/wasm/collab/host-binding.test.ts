@@ -38,7 +38,7 @@ for (const root of ["kicad_pcb", "kicad_sch"]) describe(root, () => {
       }),
       kicadCollabUnlock: vi.fn(() => { assertLocked(); locked = false; }),
       kicadCollabBusy: () => busy,
-      kicadCollabSetHistoryMode: vi.fn(() => true),
+      kicadCollabSetHistoryMode: vi.fn(() => { assertLocked(); return true; }),
       kicadCollabSetHistoryState: vi.fn(),
       kicadCollabSnapshotItems: vi.fn(() => { assertLocked(); return wire(native); }),
       kicadCollabPrepareItems: vi.fn(assertLocked),
