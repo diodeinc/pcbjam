@@ -7,6 +7,13 @@ live here. No proprietary auth, sandbox client, storage, or UI package is import
 `src/lib/collab.ts` contains the extracted collaboration helpers; MIT dependency
 attributions are in `NOTICE.js` and the generated third-party notices.
 
+**Modification notice — 2026-09-08, Diode contributors:** this is a modified
+GPL application, not unmodified upstream PCBJam. Changes include extracted browser
+coordination, standalone and authenticated iframe hosting, native toolbar
+integration, and verified runtime/source/license packaging. This date is a source
+modification date, not a build timestamp; update this notice and `modificationDate`
+in `scripts/distribute.mjs` when making subsequent application modifications.
+
 ## Build (from repository root)
 
 ```sh
@@ -14,20 +21,41 @@ pnpm -C apps/embedded-editor install --frozen-lockfile
 pnpm -C apps/embedded-editor test
 PCBJAM_RUNTIME_DIR=/absolute/path/to/installed/kicad \
 PCBJAM_RUNTIME_MANIFEST=/absolute/path/to/ARTIFACT.json \
+PCBJAM_RUNTIME_RELEASE_DIR=/absolute/path/to/published/release \
   pnpm -C apps/embedded-editor build
 pnpm -C apps/embedded-editor preview
 ```
 
-Node 22+, pnpm 12.3.4 and `tar`. Runtime directory must contain `wx.js`, `wx-dom.js`,
-`kicad_editor.js`, `kicad_editor.wasm`, `images.tar.gz`. The manifest must identify
-the published archive. Output renames `images.tar.gz` to `kicad/images.bin` without
-changing bytes, preventing static servers from auto-decompressing the resource.
-The input manifest identifies
-the published runtime's source and archive digest; it is copied unchanged. **No
-WASM rebuild** occurs. Do not mix files from different published runtime builds.
-The installed runtime used for verification was PCBJam source
-`77c522076f0b93854c87428ce01aba34514edbdb`, archive SHA-256
-`45e03a65da4e7661f1715668133babc8a0376069449596f3d6daa01b1a325673`.
+Node 22+, pnpm 12.3.4, `tar`, and Python 3 (standard-library ZIP reader only).
+Obtain these assets from the **same published native release**, without renaming
+or modifying them, and place them in `PCBJAM_RUNTIME_RELEASE_DIR`:
+`kicad-wasm.zip`, `SHA256SUMS`, `BUILD-METADATA.txt`, `SOURCE-LICENSES.txt`.
+`PCBJAM_RUNTIME_MANIFEST` is the independently reviewed release pin (`ARTIFACT.json`),
+requiring `repository` (HTTPS), `archiveSha256` (64 lowercase hex), and full 40-hex
+`sourceCommit`, `diodeKicadCommit`, `wxwidgetsCommit` values.
+
+Packaging first checks the archive SHA-256 against that exact pin, then checks
+the archive and both text sidecars against `SHA256SUMS`, and checks metadata's
+`root_commit`, `kicad_commit`, `wxwidgets_commit` against the corresponding pins.
+Malformed/duplicate checksum or metadata entries and missing assets fail closed.
+The ZIP must contain exactly `wx.js`, `wx-dom.js`, `kicad_editor.js`,
+`kicad_editor.wasm`, `images.tar.gz`, with no duplicate or extra entries.
+Verified archive snapshots are the **only** runtime bytes packaged. The existing
+`PCBJAM_RUNTIME_DIR` remains supported: if set, each of its five files must equal
+the archived bytes; it can be omitted to use the verified release archive directly.
+Output renames `images.tar.gz` to `kicad/images.bin` without changing bytes,
+preventing static servers from auto-decompressing the resource. Manifest and text
+sidecars are copied byte-for-byte, not regenerated. **No WASM rebuild** or runtime
+download occurs; no dependency is downloaded from private Registry source.
+Temporary extraction uses `TMPDIR` and is cleaned on success or failure. In a
+low-disk Linux orb, prefix the command with `TMPDIR=/dev/shm`.
+
+Trust limit: the archive is authenticated only as strongly as the independently
+reviewed manifest pin. `SHA256SUMS` is not signed or pinned by that archive digest;
+obtain it and the sidecars through a trusted release channel. Checks detect mixed
+files and metadata, but cannot authenticate a jointly replaced checksum list and
+license text. This is not a cryptographic release signature or a legal compliance
+certification. Verify corresponding source availability before redistribution.
 
 Serve the entire `dist/` directory as static files, preserving relative paths,
 with `.wasm` served as `application/wasm`. Mount at `/` or a subdirectory whose
@@ -43,10 +71,16 @@ application authenticates messages to the exact parent identity in its URL.
 For a security boundary, deploy on a separate origin from proprietary services.
 
 `dist/manifest.json` contains `schemaVersion`, `name`, `license`, `protocol`,
-`entrypoint`, `source: {directory,commit,dirty}`, `runtime` (input provenance), and
+`entrypoint`, `source: {directory,commit,dirty,modificationDate}`, `runtime` (input provenance), and
 `files: [{path,bytes,sha256}]` (all other output files, including exact app source).
 Outputs: `index.html`, `assets/*`, `kicad/*`, `licenses.html`, `LICENSE`,
 `NOTICE.js`, `THIRD-PARTY-NOTICES.txt`, `RUNTIME-ARTIFACT.json`, `source.tar`, `source/*`.
+Also included and linked from `licenses.html`: exact release `SOURCE-LICENSES.txt`,
+`BUILD-METADATA.txt`, `SHA256SUMS`, and dated application `MODIFICATIONS.txt`.
+The inventory covers every output except `manifest.json` itself, including all
+source helpers/tests, native notices, metadata and modification notices.
+`SHA256SUMS` describes the original release assets (the ZIP is an input, not shipped
+inside the app); use `manifest.json` to check distributed file bytes.
 Ship all of these; do not distribute only JS/WASM. Exact modified application
 sources accompany every distribution; pinned runtime source links include the
 recursive KiCad/wxWidgets submodules. Ensure those source links remain accessible
@@ -98,3 +132,9 @@ network sync, which awaits durable draft writes but never native rendering.
 durable-before-send orchestration, native input/history lock and queue invariants,
 toolbar payload validation and bounded diagnostics. Native WASM integration
 requires the published runtime; unit harnesses do not claim real native coverage.
+The same command also runs executable packaging fixture tests: exact valid release,
+mixed runtime bytes, wrong archive pin, mixed license/metadata sidecars, inconsistent
+root/KiCad/wxWidgets commits, malformed inputs, and complete repeated output
+inventory/source/notices. Run just those with
+`pnpm -C apps/embedded-editor test scripts/verify-runtime.test.mjs`.
+Run `pnpm -C apps/embedded-editor typecheck` separately for TypeScript validation.
