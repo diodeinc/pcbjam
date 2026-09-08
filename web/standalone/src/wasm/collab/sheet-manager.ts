@@ -119,7 +119,11 @@ export interface SheetManagerOptions {
    * `docSource: "ydoc"` only: the entry sheet's room is already connected (and possibly
    * materialized from the doc). Adopted into the pool so its first bind baselines only.
    */
-  initial?: { sheetPath: string; session: KicadDocSession; editorMatchesDoc: boolean };
+  initial?: {
+    sheetPath: string;
+    session: KicadDocSession;
+    editorMatchesDoc: boolean;
+  };
 }
 
 /** One warm room. `binding` is non-null ONLY while this is the active sheet. */
@@ -184,10 +188,7 @@ export function createSheetCollabManager(opts: SheetManagerOptions): SheetCollab
     }
   }
 
-  async function ensureRoom(
-    sheetPath: string,
-    connectOpts?: { passive?: boolean },
-  ): Promise<Room> {
+  async function ensureRoom(sheetPath: string, connectOpts?: { passive?: boolean }): Promise<Room> {
     const existing = rooms.get(sheetPath);
     if (existing) return existing;
     const inflight = connecting.get(sheetPath);
@@ -302,29 +303,55 @@ export function createSheetCollabManager(opts: SheetManagerOptions): SheetCollab
     room.detachWatch?.();
     room.detachWatch = undefined;
 
-    const binding = bindKicadCollab(room.doc, bridge, { readOnly: opts.readOnly, sheetPath });
+    const binding = bindKicadCollab(room.doc, bridge, {
+      readOnly: opts.readOnly,
+      sheetPath,
+    });
     room.binding = binding;
 
-    if (!room.seeded) {
-      // First activation: file-seed an empty room, else adopt peer/server state.
-      binding.seed(seedDocForPath(sheetPath), { editorMatchesDoc: room.editorMatchesDoc });
-      room.seeded = true;
-      clog(`[sheet] seeded ${sheetPath} (editorMatchesDoc=${room.editorMatchesDoc})`);
-    } else if (room.dirty) {
-      // Remote edits landed while parked: adopt to catch the editor's screen up.
-      binding.seed(undefined, { editorMatchesDoc: false });
-      clog(`[sheet] re-adopted ${sheetPath} (caught up parked remote edits)`);
-    } else {
-      // Clean revisit: the editor screen already matches the doc — baseline the differ
-      // (rebound after the C++ rebaseline on navigation), no full re-apply.
-      binding.seed(undefined, { editorMatchesDoc: true });
-      clog(`[sheet] rebound ${sheetPath} (no apply)`);
+    try {
+      if (!room.seeded) {
+        // First activation: file-seed an empty room, else adopt peer/server state.
+        await binding.seed(seedDocForPath(sheetPath), {
+          editorMatchesDoc: room.editorMatchesDoc,
+        });
+        clog(`[sheet] seeded ${sheetPath} (editorMatchesDoc=${room.editorMatchesDoc})`);
+      } else if (room.dirty) {
+        // Remote edits landed while parked: adopt to catch the editor's screen up.
+        await binding.seed(undefined, { editorMatchesDoc: false });
+        clog(`[sheet] re-adopted ${sheetPath} (caught up parked remote edits)`);
+      } else {
+        // Clean revisit: the editor screen already matches the doc — baseline the differ
+        // (rebound after the C++ rebaseline on navigation), no full re-apply.
+        await binding.seed(undefined, { editorMatchesDoc: true });
+        clog(`[sheet] rebound ${sheetPath} (no apply)`);
+      }
+    } catch (error) {
+      binding.destroy();
+      if (room.binding === binding) {
+        room.binding = undefined;
+        if (!destroyed) startWatch(room);
+      }
+      throw error;
     }
 
+    if (destroyed || superseded()) {
+      if (room.binding === binding) {
+        binding.destroy();
+        room.binding = undefined;
+        if (!destroyed) startWatch(room);
+      }
+      return;
+    }
+    room.seeded = true;
     room.dirty = false;
     room.editorMatchesDoc = false; // only meaningful for the first ydoc-entry seed
     activePath = sheetPath;
-    opts.onActiveChange?.({ sheetPath, doc: room.doc, provider: room.session.provider });
+    opts.onActiveChange?.({
+      sheetPath,
+      doc: room.doc,
+      provider: room.session.provider,
+    });
     // AFTER the host rebound its full presence to the new room: refresh every
     // parked room's skeleton to point at the new sheet (incl. the old active
     // room, whose full state the host just cleared).
@@ -332,6 +359,17 @@ export function createSheetCollabManager(opts: SheetManagerOptions): SheetCollab
   }
 
   function switchTo(sheetPath: string): Promise<void> {
+    // A previous switch may be waiting for a native checkpoint in seed().
+    // Cancel that binding synchronously, before it can seed the old room from
+    // the newly active screen. doSwitch's queued cleanup is too late here.
+    if (requestedPath !== sheetPath && requestedPath !== activePath) {
+      const pending = requestedPath ? rooms.get(requestedPath) : undefined;
+      if (pending?.binding) {
+        pending.binding.destroy();
+        pending.binding = undefined;
+        startWatch(pending);
+      }
+    }
     requestedPath = sheetPath;
     if (retryTimer) {
       clearTimeout(retryTimer);
@@ -455,7 +493,11 @@ export function createSheetCollabManager(opts: SheetManagerOptions): SheetCollab
     if (!activePath) return null;
     const room = rooms.get(activePath);
     if (!room) return null;
-    return { sheetPath: activePath, doc: room.doc, provider: room.session.provider };
+    return {
+      sheetPath: activePath,
+      doc: room.doc,
+      provider: room.session.provider,
+    };
   }
 
   function destroy(): void {
@@ -480,7 +522,15 @@ export function createSheetCollabManager(opts: SheetManagerOptions): SheetCollab
     opts.onActiveChange?.(null);
   }
 
-  return { connectAll, switchTo, onboard, invalidate, syncLayoutFromSave, active, destroy };
+  return {
+    connectAll,
+    switchTo,
+    onboard,
+    invalidate,
+    syncLayoutFromSave,
+    active,
+    destroy,
+  };
 }
 
 export interface SheetChangedWindow {

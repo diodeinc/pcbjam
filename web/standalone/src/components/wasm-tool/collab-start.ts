@@ -167,7 +167,7 @@ export async function maybeStartCollab(
     // opened the file materialized from this very doc, attach + baseline only;
     // when the room was empty (API fallback), seed() file-seeds it as usual.
     clog("attaching to pre-connected doc session; editorMatchesDoc:", !!opts.editorMatchesDoc);
-    const handle = attachKicadCollab(mod, win as unknown as KicadItemsWindow, opts.collabSession, {
+    const handle = await attachKicadCollab(mod, win as unknown as KicadItemsWindow, opts.collabSession, {
       seedDoc,
       editorMatchesDoc: opts.editorMatchesDoc,
       readOnly: opts.readOnly,
@@ -385,4 +385,3 @@ export async function waitForWxUi(win: ToolWindow, timeoutMs = 25_000): Promise<
     await new Promise((r) => setTimeout(r, 150));
   }
 }
-

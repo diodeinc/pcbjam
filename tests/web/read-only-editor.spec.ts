@@ -1,6 +1,7 @@
 import { test, expect, type Browser, type Page } from '@playwright/test';
 import { openOverlayMenu } from './overlay-menu';
 import { shotPath } from '../e2e/utils/element-tracker';
+import { collabEvaluate } from '../kicad/utils/collab-lock';
 
 // Viewer + writer pages boot once in beforeAll and the tests are ordered
 // (the read-only viewer must join the fresh room FIRST). Serial group:
@@ -333,7 +334,7 @@ test("a writer's edits stream into the viewer live (and never the reverse)", asy
   const posBefore = await posOf(viewer, itemId);
 
   // 2 mm — small nudges vanish in s-expr formatting (see ysync-two-tab.spec.ts).
-  const moved = await writer.evaluate(() =>
+  const moved = await collabEvaluate(writer, () =>
     (window as unknown as W).Module.kicadCollabTestMoveFirst(2_000_000, 0),
   );
   expect(moved).toBe(itemId);

@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { loadCollabBundle } from "./utils/capture-items";
 
 /**
  * N2 — message ordering under a parked open (scheduler semantics).
@@ -9,9 +10,9 @@ import { test, expect } from "./fixtures";
  * `kicadOpenFile` was parked; the mailbox flipped drop→deliver, and the
  * scheduler's embind lane is the only glue now: a mutating entry issued
  * during the open becomes a queued message, applied IN ORDER after the open
- * completes — the shim wraps the audited mutators (doc 18) at the Module
- * boundary, queueing busy-window calls and delivering after settle with
- * promise-returned results.
+ * completes. Collaboration now adds mandatory native checkpoints: the host
+ * FIFO must retain requests issued mid-load until it can acquire the lock.
+ * A queued embind call alone is not permission to mutate without that lock.
  *
  * Ordering probe: apply A ADDS a segment, apply B MOVES that same segment.
  * B can only land if A landed first — the single final-position check proves
@@ -83,6 +84,7 @@ test.describe("mailbox N2: entries during a parked open are delivered in order",
     test.setTimeout(180000);
     void testLogger;
     await bootHarness(page);
+    await loadCollabBundle(page);
 
     const issued = await page.evaluate(async ({ newSeg, board }) => {
       const w = window as unknown as { FS: FS; Module: Mod };
@@ -125,8 +127,13 @@ test.describe("mailbox N2: entries during a parked open are delivered in order",
         ],
         removed: [],
       });
-      w.Module.kicadCollabApplyItems(applyA);
-      w.Module.kicadCollabApplyItems(applyB);
+      const host = (window as unknown as { KicadCollabV2: {
+        atCheckpoint<T>(run: () => T): Promise<T>;
+      } }).KicadCollabV2;
+      const applies = Promise.all([
+        host.atCheckpoint(() => w.Module.kicadCollabApplyItems(applyA)),
+        host.atCheckpoint(() => w.Module.kicadCollabApplyItems(applyB)),
+      ]);
 
       // Wait for the open chain to settle.
       const t1 = performance.now();
@@ -134,6 +141,7 @@ test.describe("mailbox N2: entries during a parked open are delivered in order",
         await new Promise((r) => setTimeout(r, 50));
       }
       w.Module.kicadTestSetOpenPark(0);
+      await applies;
       return { inWindow: true, settled: !w.Module.kicadOpenFileBusy() };
     }, { newSeg: NEW_SEG, board: smallBoard() });
 

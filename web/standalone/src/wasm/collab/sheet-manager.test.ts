@@ -79,7 +79,11 @@ beforeEach(() => {
   moduleItemsBridge.mockReset();
 
   connectKicadDoc.mockImplementation(async ({ room }: { room: string }) => {
-    const session: FakeSession = { room, doc: makeDoc(), provider: { destroy: vi.fn() } };
+    const session: FakeSession = {
+      room,
+      doc: makeDoc(),
+      provider: { destroy: vi.fn() },
+    };
     sessions.push(session);
     return session;
   });
@@ -101,6 +105,51 @@ beforeEach(() => {
 });
 
 describe("sheet-manager warm pool", () => {
+  it("destroys a rejected async seed before retrying the warm room", async () => {
+    const first: FakeBinding = {
+      seed: vi.fn().mockRejectedValue(new Error("checkpoint failed")),
+      destroy: vi.fn(),
+    };
+    bindKicadCollab.mockImplementationOnce(() => first);
+    const m = makeManager();
+    await m.switchTo("a.kicad_sch");
+    expect(first.destroy).toHaveBeenCalledTimes(1);
+    expect(m.active()).toBeNull();
+    await m.switchTo("a.kicad_sch");
+    expect(connectKicadDoc).toHaveBeenCalledTimes(1);
+    expect(bindKicadCollab).toHaveBeenCalledTimes(2);
+    expect(m.active()?.sheetPath).toBe("a.kicad_sch");
+    m.destroy();
+  });
+
+  it("cancels a binding synchronously when navigation supersedes its async seed", async () => {
+    let finish!: () => void;
+    const first: FakeBinding = {
+      seed: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+      destroy: vi.fn(),
+    };
+    bindKicadCollab.mockImplementationOnce(() => {
+      bindings.push(first);
+      return first;
+    });
+    const m = makeManager();
+    const a = m.switchTo("a.kicad_sch");
+    await vi.waitFor(() => expect(first.seed).toHaveBeenCalledTimes(1));
+    const b = m.switchTo("b.kicad_sch");
+    expect(first.destroy).toHaveBeenCalledTimes(1);
+    finish();
+    await Promise.all([a, b]);
+    expect(m.active()?.sheetPath).toBe("b.kicad_sch");
+    expect(first.destroy).toHaveBeenCalledTimes(1);
+    expect(bindings).toHaveLength(2);
+    m.destroy();
+  });
+
   it("warms each sheet once and dedups re-warming", async () => {
     const m = makeManager();
     await m.connectAll(["a.kicad_sch", "b.kicad_sch"]);
@@ -113,10 +162,9 @@ describe("sheet-manager warm pool", () => {
     const m = makeManager();
     await m.switchTo("a.kicad_sch");
     await m.switchTo("sub/b.kicad_sch");
-    expect(bindKicadCollab.mock.calls.map((c) => (c[2] as { sheetPath?: string }).sheetPath)).toEqual([
-      "a.kicad_sch",
-      "sub/b.kicad_sch",
-    ]);
+    expect(
+      bindKicadCollab.mock.calls.map((c) => (c[2] as { sheetPath?: string }).sheetPath),
+    ).toEqual(["a.kicad_sch", "sub/b.kicad_sch"]);
   });
 
   it("first switch binds + seeds the active sheet", async () => {
@@ -291,8 +339,7 @@ describe("sheet-manager lifecycle hardening (findings C-1/C-4/C-5)", () => {
       projectId: "P",
       provider: { kind: "none" } as never,
       seedDocForPath: () => undefined,
-      onActiveChange: (active) =>
-        events.push(active ? `bind:${active.sheetPath}` : "clear"),
+      onActiveChange: (active) => events.push(active ? `bind:${active.sheetPath}` : "clear"),
       log: () => {},
     });
     await m.switchTo("a.kicad_sch");
@@ -303,8 +350,7 @@ describe("sheet-manager lifecycle hardening (findings C-1/C-4/C-5)", () => {
     connectKicadDoc.mockImplementationOnce(
       ({ room }: { room: string }) =>
         new Promise((res) => {
-          releaseB = () =>
-            res({ room, doc: makeDoc(), provider: { destroy: vi.fn() } });
+          releaseB = () => res({ room, doc: makeDoc(), provider: { destroy: vi.fn() } });
         }),
     );
     const sw = m.switchTo("b.kicad_sch");
@@ -330,7 +376,11 @@ describe("sheet-manager lifecycle hardening (findings C-1/C-4/C-5)", () => {
       ({ room }: { room: string }) =>
         new Promise((res) => {
           releaseRoot = () => {
-            const session = { room, doc: makeDoc(), provider: { destroy: vi.fn() } };
+            const session = {
+              room,
+              doc: makeDoc(),
+              provider: { destroy: vi.fn() },
+            };
             sessions.push(session);
             res(session);
           };
@@ -347,10 +397,7 @@ describe("sheet-manager lifecycle hardening (findings C-1/C-4/C-5)", () => {
     expect(bindings[0]!.seed).toHaveBeenCalledTimes(1);
     expect(m.active()?.sheetPath).toBe("sub.kicad_sch");
     // The root room stays warm (parked) — the superseded switch is not a failure.
-    expect(sessions.map((s) => s.room).sort()).toEqual([
-      "S:P:root.kicad_sch",
-      "S:P:sub.kicad_sch",
-    ]);
+    expect(sessions.map((s) => s.room).sort()).toEqual(["S:P:root.kicad_sch", "S:P:sub.kicad_sch"]);
   });
 
   it("switchTo rejects SexprVersionError terminally — no retry, queue stays usable (C-5)", async () => {

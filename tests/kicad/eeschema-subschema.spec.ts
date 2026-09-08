@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
 
 /**
  * Subschema (hierarchical sheet) collab scoping — the Phase-0 C++ change.
@@ -122,7 +123,7 @@ test.describe("eeschema subschema (hierarchical sheet) collab scoping", () => {
       .poll(
         async () => {
           const snap = JSON.parse(
-            await page.evaluate(() => window.Module.kicadCollabSnapshotItems()),
+            await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems()),
           ) as { added: Array<{ sexpr: string }> };
           return snap.added.map((w) => w.sexpr).join("\n");
         },
@@ -131,7 +132,7 @@ test.describe("eeschema subschema (hierarchical sheet) collab scoping", () => {
       .toContain(ROOT_WIRE_UUID);
 
     const blobs = JSON.parse(
-      await page.evaluate(() => window.Module.kicadCollabSnapshotItems()),
+      await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems()),
     ) as { added: Array<{ sexpr: string }> };
     const allBlobs = blobs.added.map((w) => w.sexpr).join("\n");
 

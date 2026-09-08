@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "./fixtures";
 import { execSync } from "child_process";
 import * as path from "path";
+import { collabEvaluate } from "./utils/collab-lock";
 
 /**
  * repro for R-2 (docs/features/findings/groups/R-fixed-during-demo-record.md)
@@ -89,7 +90,7 @@ test("snapshotting a board with vias emits their width without a GetWidth assert
   await bootAndOpen(page);
 
   // Several snapshots: pre-fix this was one assert PER VIA PER SNAPSHOT.
-  const snaps = await page.evaluate(() => {
+  const snaps = await collabEvaluate(page, () => {
     const m = (window as unknown as { Module: Mod }).Module;
     return [0, 1, 2].map(() => JSON.parse(m.kicadCollabSnapshot()));
   });

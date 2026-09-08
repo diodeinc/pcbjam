@@ -1,6 +1,8 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 import { expectGuardsSilent } from "./utils/wait-beacons";
+import { collabEvaluate } from "./utils/collab-lock";
+import { loadCollabBundle } from "./utils/capture-items";
 
 /**
  * Timer-park concurrency repro (gal-refresh-timer investigation).
@@ -159,6 +161,10 @@ async function armAndRide(
 ): Promise<CycleStats> {
   return page.evaluate(async ({ parkMs, hammer, growHeap }) => {
     const m = (window as unknown as { Module: Mod }).Module;
+    const host = (window as unknown as { KicadCollabV2: {
+      atCheckpoint<T>(run: () => T): Promise<T>;
+    } }).KicadCollabV2;
+    const pending: Promise<void>[] = [];
     const before = JSON.parse(m.kicadTestTimerParkState()) as { fired: number; done: number };
     const stats = {
       armed: false,
@@ -217,16 +223,17 @@ async function armAndRide(
           ["snapshotItems", () => m.kicadCollabSnapshotItems()],
           ["getPos", () => m.kicadCollabGetPos("fa220000-0000-0000-0000-00000000cafe")],
         ] as const) {
-          try {
-            fn();
+          pending.push(host.atCheckpoint(async () => {
+            await fn();
             stats.hammerIters++;
-          } catch (e) {
+          }).catch(e => {
             stats.errors.push(`${name} during park: ${String(e)}`);
-          }
+          }));
         }
       }
       await new Promise((r) => setTimeout(r, 10));
     }
+    await Promise.all(pending);
     stats.elapsedMs = Math.round(performance.now() - t0);
     return stats;
   }, opts);
@@ -240,6 +247,7 @@ test.describe("timer Notify() suspends during the main-loop frame yield (concurr
     test.setTimeout(300000);
     await bootHarness(page);
     await openAndSettle(page, board());
+    await loadCollabBundle(page);
 
     const cycles: Array<{ label: string; hammer: boolean; growHeap?: boolean }> = [
       { label: "park only", hammer: false },
@@ -269,12 +277,12 @@ test.describe("timer Notify() suspends during the main-loop frame yield (concurr
 
     // The runtime is still fully functional: snapshots walk the board and a
     // real apply lands (a poisoned suspension state fails one of these first).
-    const itemCount = await page.evaluate(
+    const itemCount = await collabEvaluate(page,
       () =>
         JSON.parse((window.Module as unknown as Mod).kicadCollabSnapshotItems()).added.length,
     );
     expect(itemCount, "post-cycle snapshot sees the board").toBeGreaterThan(2000);
-    await page.evaluate(
+    await collabEvaluate(page,
       (id) =>
         (window.Module as unknown as Mod).kicadCollabApply(
           JSON.stringify({

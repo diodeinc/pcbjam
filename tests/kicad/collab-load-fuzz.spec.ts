@@ -1,5 +1,7 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
+import { loadCollabBundle } from "./utils/capture-items";
 
 /**
  * Collab-entry-during-load gate test + fuzz (docs/features/async/14-open-settle-gate.md).
@@ -170,6 +172,7 @@ async function openAndHammer(
   page: Page,
   opts: { content: string; probeUuid: string; parkMs: number; starve: boolean },
 ): Promise<FuzzStats> {
+  await loadCollabBundle(page);
   return page.evaluate(async ({ content, probeUuid, parkMs, starve }) => {
     const w = window as unknown as {
       FS: FS;
@@ -231,6 +234,10 @@ async function openAndHammer(
     let iterations = 0;
     let maxBusySnapshotItems = 0;
     const errors: string[] = [];
+    const pending: Promise<void>[] = [];
+    const host = (window as unknown as { KicadCollabV2: {
+      atCheckpoint<T>(run: () => T): Promise<T>;
+    } }).KicadCollabV2;
     // The scheduler QUEUES busy-window entries for post-settle delivery
     // (doc 17 §3b) — an unbounded hammer would replay hundreds of heavy
     // applies/snapshots afterwards (each Push walks connectivity across the
@@ -255,21 +262,26 @@ async function openAndHammer(
         ["applyItems", () => w.Module.kicadCollabApplyItems(wireDelta)],
         ["apply", () => w.Module.kicadCollabApply(scalarDelta)],
       ] as const) {
-        try {
-          const out = fn();
-          if (typeof out === "string" && name.startsWith("snapshot")) {
+        // Retain mid-load requests in the host FIFO. Do not invoke guarded
+        // native exports unlocked and mistake their empty result for success.
+        pending.push(host.atCheckpoint(async () => {
+          const busy = w.Module.kicadOpenFileBusy();
+          if (busy) throw new Error("checkpoint entered an unfinished open");
+          const out = await fn();
+          if (name.startsWith("snapshot")) {
+            if (typeof out !== "string") throw new Error("queued snapshot did not resolve");
             const added = (JSON.parse(out) as { added: unknown[] }).added.length;
-            if (added > maxBusySnapshotItems) maxBusySnapshotItems = added;
+            if (w.Module.kicadOpenFileBusy()) maxBusySnapshotItems = Math.max(maxBusySnapshotItems, added);
+            if (added < 12000) throw new Error("queued snapshot did not see the loaded board");
           }
-        } catch (e) {
-          errors.push(`${name} during load: ${String(e)}`);
-        }
+        }).catch(e => { errors.push(`${name} during load: ${String(e)}`); }));
       }
       await new Promise((r) => setTimeout(r, 10));
     }
     for (const b of burners) b.terminate();
     if (burnUrl) URL.revokeObjectURL(burnUrl);
     if (parkMs > 0) w.Module.kicadTestSetOpenPark!(0);
+    await Promise.all(pending);
     return {
       busySamples,
       iterations,
@@ -285,10 +297,9 @@ async function openAndHammer(
 async function assertSettledContract(page: Page, stats: FuzzStats): Promise<void> {
   expect(stats.settled, "kicadOpenFileBusy cleared after the load").toBe(true);
   expect(stats.errors, "no traps while hammering entries mid-load").toEqual([]);
-  // Guard held: no mid-load snapshot ever saw the model. A busy-window
-  // snapshot returns a Promise (typeof !== "string" — the hammer skips it),
-  // so a nonzero count here means a synchronous walk leaked through the gate.
-  expect(stats.maxBusySnapshotItems, "mid-load snapshots returned the empty delta").toBe(0);
+  // Requests issued mid-load must resolve only after a safe checkpoint, with
+  // the loaded board (checked in the hammer), never a partial/empty snapshot.
+  expect(stats.maxBusySnapshotItems, "no snapshot resolved during an unfinished open").toBe(0);
   await expect.poll(() => page.title(), { timeout: 30000 }).toMatch(/fuzz/i);
 
   // Delivery contract (docs/features/async/17 §3b): the embind lane QUEUED
@@ -320,13 +331,13 @@ async function assertSettledContract(page: Page, stats: FuzzStats): Promise<void
     .toBe(HAMMER_TARGET);
 
   // Guard released: the snapshot now walks the real, fully-loaded board…
-  const itemCount = await page.evaluate(
+  const itemCount = await collabEvaluate(page,
     () => JSON.parse((window.Module as unknown as Mod).kicadCollabSnapshotItems()).added.length,
   );
   expect(itemCount, "post-load snapshot sees the board").toBeGreaterThan(12000);
 
   // …and a real apply lands.
-  await page.evaluate(
+  await collabEvaluate(page,
     (id) =>
       (window.Module as unknown as Mod).kicadCollabApply(
         JSON.stringify({

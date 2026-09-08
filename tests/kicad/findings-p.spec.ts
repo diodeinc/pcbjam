@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
 import { waitForEditorReady, clickByTooltip, findByTooltip, clickMenuBarItem, clickMenuItemByText, waitUntil } from "../e2e/utils/element-tracker";
 import { waitForPcbnew } from "./utils/pcbnew-ready";
 import { injectFromSubmodule } from "./utils/fs-inject";
@@ -338,7 +339,7 @@ test.describe("P-5 liftBlob gap", () => {
 type SnapItem = { id: string; type: string; x: number; y: number };
 
 async function snapshotItems(page: Page): Promise<SnapItem[]> {
-  return page.evaluate(() => JSON.parse((window as unknown as W).Module.kicadCollabSnapshot()).added);
+  return collabEvaluate(page, () => JSON.parse((window as unknown as W).Module.kicadCollabSnapshot()).added);
 }
 async function getPos(page: Page, id: string) {
   const raw = await page.evaluate((i) => (window as unknown as W).Module.kicadCollabGetPos(i), id);

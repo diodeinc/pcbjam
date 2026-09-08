@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
 
 /**
  * ysync bug 07 (UP side) — `kicadCollabApplyItems` runs deferred on whatever
@@ -44,7 +45,7 @@ const RIGHT = "33333333-0000-0000-0000-0000000000bb";
 const PLAIN = "33333333-0000-0000-0000-0000000000cc";
 
 async function saveRead(page: Page): Promise<string> {
-  return page.evaluate((dir) => {
+  return collabEvaluate(page, (dir) => {
     const w = window as unknown as { FS: FS; Module: Mod };
     const out = `${dir}/probe.kicad_sch`;
     w.Module.kicadSaveSchematic(out);
@@ -93,7 +94,7 @@ test.describe("eeschema applyItems sheet guard (ysync bug 07 UP side)", () => {
     }).toBe(true);
 
     // Applies are serialized on the tool's coroutine: wrong → right → plain.
-    await page.evaluate(
+    await collabEvaluate(page,
       ({ wrong, right, plain, rel }) => {
         const m = (window as unknown as { Module: Mod }).Module;
         m.kicadCollabApplyItems(JSON.stringify({ added: [{ sexpr: wrong }], sheet: "Arduino Mega 2560/ATMEGA2560-16AU.kicad_sch" }));

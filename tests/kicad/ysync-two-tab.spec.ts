@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
 
 /**
  * V2 "items" wire two-tab e2e — the PRODUCTION collab stack, end to end
@@ -186,7 +187,7 @@ function startV2(
 
 /** Read a tab's current model back as text via save-to-MEMFS. */
 function modelText(page: Page, cfg: ToolCfg): Promise<string> {
-  return page.evaluate(
+  return collabEvaluate(page,
     ({ saveFn, ext }) => {
       const w = window as unknown as { FS: FS; Module: Mod };
       const out = `/home/kicad/documents/_dump.${ext}`;
@@ -211,7 +212,7 @@ function renderDoc(page: Page): Promise<{ ok?: string; err?: string }> {
 
 /** Item-level drift summary (see browser-entry-v2.ts driftReport). */
 function drift(page: Page, cfg: ToolCfg) {
-  return page.evaluate(
+  return collabEvaluate(page,
     ({ saveFn, ext }) => {
       const w = window as unknown as {
         KicadCollabV2: {
@@ -371,7 +372,7 @@ for (const [cfg, label] of [
       const before: Record<string, string> = {};
       for (const u of uuids) before[u] = await getPos(tabA, u);
 
-      const movedId = (await tabA.evaluate(() =>
+      const movedId = (await collabEvaluate(tabA, () =>
         (window as unknown as { Module: { kicadCollabTestMoveFirst(dx: number, dy: number): string } })
           .Module.kicadCollabTestMoveFirst(2_000_000, 0),
       )) as string;
@@ -472,11 +473,11 @@ test.describe("v2 items wire — pcbnew bare child removal (bug 03 Y-half repro)
     await bootOpen(tabA, PCB, "tabA");
     await startV2(tabA, { room, seedText: PCB.fixture }); // file-seed: fp + children in kdoc_items
 
-    // Simulate exactly the wire the C++ sends for "delete the fp_text child"
-    // through the binding's REAL hook (moduleItemsBridge registered it).
+    // A legacy peer can still send a bare child removal. Apply its wire to
+    // the host doc; local PCB edits now arrive via locked pull, not onItems.
     await tabA.evaluate((uuid) => {
-      const w = window as unknown as { kicadCollab: { onItems(j: string): void } };
-      w.kicadCollab.onItems(JSON.stringify({ added: [], changed: [], removed: [uuid] }));
+      const w = window as unknown as { KicadCollabV2: { applyPeerItems(j: string): void } };
+      w.KicadCollabV2.applyPeerItems(JSON.stringify({ added: [], changed: [], removed: [uuid] }));
     }, FP1_TXT);
 
     // CORRECT: the room still materializes, without the child. TODAY:

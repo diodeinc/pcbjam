@@ -31,6 +31,8 @@ import {
   type KicadYItems,
 } from "@pcbjam/shared";
 import { clog, cwarn } from "./debug";
+import { withCollabLock, type CollabLockModule } from "./lock";
+import { createHostBinding, type HostModule, type HostWindow } from "./host-binding";
 
 /**
  * The Slot-model collab binding (ysync 0008 Stage B) — the THIN RUNTIME over the
@@ -64,6 +66,9 @@ export interface KicadItemsBridge {
   applyItems(json: string): void;
   /** Register the local-edit emit hook (Format changed items → JSON). */
   onItems(cb: (json: string) => void): void;
+  /** Live editors acquire their native checkpoint before snapshot/apply. */
+  runExclusive?(run: () => void): Promise<void>;
+  host?: { mod: HostModule; win: HostWindow };
 }
 
 export interface KicadBinding {
@@ -80,10 +85,12 @@ export interface KicadBinding {
    * (docToFile — the Y.Doc-load path), so the adopt re-apply would be a no-op
    * full-document blob apply; skip it and just baseline the wasm differ.
    */
-  seed(seedDoc?: KicadDoc, opts?: { editorMatchesDoc?: boolean }): void;
+  seed(seedDoc?: KicadDoc, opts?: { editorMatchesDoc?: boolean }): void | Promise<void>;
   destroy(): void;
   /** The underlying kdoc items map (exposed for tests/inspection). */
   readonly items: KicadYItems;
+  /** Read-only inspection of the opt-in host history, absent on pl_editor. */
+  readonly historyState?: { undo: number; redo: number; pending: number; running: boolean };
 }
 
 /**
@@ -150,6 +157,9 @@ export function bindKicadCollab(
   let destroyed = false;
   // Concurrent double-seed arbitration cleanup (bug 06); set by the file-seed branch.
   let detachSeedArbitration: (() => void) | undefined;
+  const host = bridge.host
+    ? createHostBinding(doc, bridge.host.mod, bridge.host.win, { readOnly, sheetPath })
+    : undefined;
 
   /**
    * Plain snapshot of the Y items (the `current`/`view` the conversions need).
@@ -178,7 +188,7 @@ export function bindKicadCollab(
     cwarn("wire entry skipped (un-resolvable):", err, w.sexpr.slice(0, 200));
 
   // DOWN: local editor change → Y.Doc
-  bridge.onItems((json: string) => {
+  if (!host) bridge.onItems((json: string) => {
     if (readOnly) return; // viewer: local state never reaches the doc
     if (destroyed) return; // stale hook (bug 07) — a destroyed binding is inert
     let wire: ItemsWireDelta;
@@ -218,6 +228,7 @@ export function bindKicadCollab(
   const observer = (events: Y.YEvent<Y.Map<unknown>>[], txn: Y.Transaction) => {
     if (txn.origin === ORIGIN) return; // our own echo — ignore
     if (!seeded) return; // pre-seed state sync — seed()'s adopt covers it
+    if (host) { host.wake(); return; }
     const delta = deltaFromYEvents(items, events);
     if (isEmptyKicadDelta(delta)) return;
     const wire = deltaToItemsWire(delta, itemsView(), libDefs);
@@ -227,9 +238,7 @@ export function bindKicadCollab(
       changed: wire.changed.length,
       removed: wire.removed.length,
     });
-    try {
-      bridge.applyItems(JSON.stringify(tagged(wire)));
-    } catch (err) {
+    const reportFailure = (err: unknown) => {
       // Symmetric with the DOWN hook's backstop above (findings C-7): a throw
       // here would otherwise unwind through Yjs's transaction cleanup inside
       // the provider's applyUpdate. Log, then re-surface on a clean stack so
@@ -243,6 +252,15 @@ export function bindKicadCollab(
             throw e;
           }, 0));
       report(err);
+    };
+    const apply = () => {
+      if (!destroyed) bridge.applyItems(JSON.stringify(tagged(wire)));
+    };
+    try {
+      if (bridge.runExclusive) void bridge.runExclusive(apply).catch(reportFailure);
+      else apply();
+    } catch (err) {
+      reportFailure(err);
     }
   };
   items.observeDeep(observer);
@@ -292,12 +310,17 @@ export function bindKicadCollab(
   };
   revMeta.observe(onRevertMeta);
 
-  function seed(seedDoc?: KicadDoc, opts?: { editorMatchesDoc?: boolean }): void {
-    try {
-      seedInner(seedDoc, opts);
-    } finally {
-      repairLayout("post-seed");
-    }
+  function seed(seedDoc?: KicadDoc, opts?: { editorMatchesDoc?: boolean }): void | Promise<void> {
+    const run = () => {
+      if (destroyed) return;
+      try {
+        seedInner(seedDoc, opts);
+      } finally {
+        repairLayout("post-seed");
+      }
+    };
+    if (host) return host.seed(run);
+    return bridge.runExclusive ? bridge.runExclusive(run) : run();
   }
 
   function seedInner(seedDoc?: KicadDoc, opts?: { editorMatchesDoc?: boolean }): void {
@@ -476,8 +499,10 @@ export function bindKicadCollab(
 
   return {
     seed,
+    get historyState() { return host?.historyState; },
     destroy: () => {
       destroyed = true; // gates the DOWN hook — see bug 07 note above
+      host?.destroy();
       layout.unobserve(onLayout);
       detachSeedArbitration?.();
       detachSeedArbitration = undefined;
@@ -491,7 +516,7 @@ export function bindKicadCollab(
 // ── Live wasm adapter ─────────────────────────────────────────────────────────
 
 /** The Stage C Module exports + window hook, as the browser exposes them. */
-export interface KicadItemsModule {
+export interface KicadItemsModule extends CollabLockModule {
   kicadCollabSnapshotItems(): string;
   kicadCollabApplyItems(json: string): void;
 }
@@ -505,7 +530,12 @@ export function moduleItemsBridge(
   mod: KicadItemsModule,
   win: KicadItemsWindow,
 ): KicadItemsBridge {
+  const hostMod = mod as KicadItemsModule & Partial<HostModule>;
   return {
+    host: typeof hostMod.kicadCollabSetHistoryMode === "function"
+      ? { mod: hostMod as HostModule, win }
+      : undefined,
+    runExclusive: (run) => withCollabLock(mod, run),
     snapshotItems: () => mod.kicadCollabSnapshotItems(),
     applyItems: (json) => mod.kicadCollabApplyItems(json),
     onItems: (cb) => {

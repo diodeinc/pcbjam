@@ -62,6 +62,11 @@ class FakeEditor implements KicadItemsBridge {
     this.emit?.(json);
   }
 
+  localBatch(json: string): void {
+    this.applyToStore(json);
+    this.emit?.(json);
+  }
+
   private applyToStore(json: string): void {
     const delta = itemsWireToDelta(parseItemsWireDelta(json), this.store);
     for (const it of [...delta.added, ...delta.updated]) {
@@ -100,6 +105,21 @@ describe("bindKicadCollab — two editors over relayed Y.Docs", () => {
     const bindB = bindKicadCollab(b, edB);
     return { a, b, edA, edB, bindA, bindB };
   }
+
+  it("legacy delta ingress keeps healthy entries when a batch contains a hollow board envelope", () => {
+    const { edA, edB, bindA, bindB } = setup();
+    seedEditor(edA, FP);
+    bindA.seed();
+    bindB.seed();
+    edA.localBatch(JSON.stringify({ added: [], changed: [
+      { parent: null, sexpr: FP.replace("(at 10 10)", "(at 20 30)") },
+      { parent: null, sexpr: '(kicad_pcb (layers (0 "F.Cu" signal)))' },
+    ], removed: [] }));
+    expect(renderItem({ items: edB.store }, "fp-1")).toContain("(at 20 30)");
+    expect(Object.keys(edB.store).sort()).toEqual(["fld-1", "fp-1", "pad-1"]);
+    bindA.destroy();
+    bindB.destroy();
+  });
 
   it("seed → add → edit → remove propagates both ways; no self-echo", () => {
     const { edA, edB, bindA, bindB } = setup();

@@ -1,5 +1,7 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
+import { captureLocalItems } from "./utils/capture-items";
 
 /**
  * pcbnew single-tab repros for the C++-side ysync bugs (docs in
@@ -140,7 +142,7 @@ async function bootOpen(page: Page): Promise<void> {
 }
 
 function saveRead(page: Page): Promise<string> {
-  return page.evaluate(() => {
+  return collabEvaluate(page, () => {
     const w = window as unknown as { FS: FS; Module: Mod };
     const out = "/home/kicad/documents/probe.kicad_pcb";
     w.Module.kicadSaveBoard(out);
@@ -151,21 +153,16 @@ function saveRead(page: Page): Promise<string> {
 /** The footprint's snapshot blob (v2 wire) — FP1 with its children embedded. */
 async function fp1Blob(page: Page): Promise<string> {
   const snap = JSON.parse(
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems()),
+    await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems()),
   ) as { added: Array<{ sexpr: string }> };
   const blob = snap.added.map((w) => w.sexpr).find((s) => s.includes(FP1));
   expect(blob, "snapshot blob for the footprint").toBeTruthy();
   return blob!;
 }
 
-/** Register the onItems capture (single tab — no binding to preserve). */
+/** Capture the production host's local-only outgoing item changes. */
 function captureEmits(page: Page): Promise<void> {
-  return page.evaluate(() => {
-    (window as unknown as { __items: string[] }).__items = [];
-    (window as unknown as { kicadCollab: object }).kicadCollab = {
-      onItems: (j: string) => (window as unknown as { __items: string[] }).__items.push(j),
-    };
-  });
+  return captureLocalItems(page, SAMPLE_PCB);
 }
 
 function emittedWires(page: Page): Promise<string> {
@@ -208,7 +205,7 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
   }) => {
     await bootOpen(page);
     expect(await saveRead(page)).toContain(SEG2);
-    await page.evaluate((seg) => {
+    await collabEvaluate(page, (seg) => {
       window.Module.kicadCollabApplyItems(
         JSON.stringify({ added: [], changed: [], removed: [seg] }),
       );
@@ -229,7 +226,7 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
     // The wire a peer sends after deleting the fp_text: a bare child removal
     // (the emit side lifts adds/changes to a parent re-blob but NOT removals —
     // 03-bug-child-removal-dangling-slot.md).
-    await page.evaluate((uuid) => {
+    await collabEvaluate(page, (uuid) => {
       window.Module.kicadCollabApplyItems(
         JSON.stringify({ added: [], changed: [], removed: [uuid] }),
       );
@@ -251,12 +248,10 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
     testLogger,
   }) => {
     await bootOpen(page);
-    // snapshotItems: registers the COLLAB_LISTENER (ensureBridge) + baselines
-    // the differ — the two side effects seed()'s non-file-seed branches rely on.
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
+    // Host seeding baselines a locked snapshot before any local edit.
     await captureEmits(page);
 
-    const movedId = (await page.evaluate(() =>
+    const movedId = (await collabEvaluate(page, () =>
       window.Module.kicadCollabTestMoveFirst(2_000_000, 0),
     )) as string;
     expect(movedId).toMatch(/[0-9a-f-]{36}/);
@@ -275,7 +270,6 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
     testLogger,
   }) => {
     await bootOpen(page);
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
     await captureEmits(page);
 
     // Pre-positions of every fixture uuid, so the moved item is verifiable
@@ -286,15 +280,12 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
       before[u] = await page.evaluate((id) => window.Module.kicadCollabGetPos(id), u);
     }
 
-    // ONE JS turn: queue the local move, then the unrelated remote apply.
-    // CallAfter drain order is FIFO → [move, apply, flush]: the move's commit
-    // fires the listener (flush queued BEHIND the apply), then the apply's
-    // global rebaseline() snapshots the model WITH the move already in it, so
-    // the flush diffs to empty (05-bug-rebaseline-swallows-local-edits.md).
-    const movedId = (await page.evaluate((fpSexpr) => {
+    // ONE JS turn: queue a native local move and a peer Yjs update. The host
+    // must capture the settled local commit before rendering that peer update.
+    const movedId = (await collabEvaluate(page, (fpSexpr) => {
       const m = window.Module;
       const id = m.kicadCollabTestMoveFirst(3_000_000, 0);
-      m.kicadCollabApplyItems(
+      (window as unknown as { KicadCollabV2: { applyPeerItems(wire: string): void } }).KicadCollabV2.applyPeerItems(
         JSON.stringify({ added: [{ sexpr: fpSexpr, parent: null }], changed: [], removed: [] }),
       );
       return id;
@@ -337,7 +328,6 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
       hook,
     );
     if (!has) return false;
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
     await captureEmits(page);
     return true;
   }
@@ -346,7 +336,7 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
     const ok = await armed(page, "kicadCollabTestRotateItem");
     test.skip(!ok, "wasm build predates the ysync repro hooks");
 
-    const queued = await page.evaluate(
+    const queued = await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestRotateItem(i: string, d: number): boolean } })
           .Module.kicadCollabTestRotateItem(id, 90),
@@ -376,7 +366,7 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
     const ok = await armed(page, "kicadCollabTestSetPadSize");
     test.skip(!ok, "wasm build predates the ysync repro hooks");
 
-    const queued = await page.evaluate(
+    const queued = await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestSetPadSize(i: string, w: number, h: number): boolean } })
           .Module.kicadCollabTestSetPadSize(id, 2_000_000, 2_000_000),
@@ -405,7 +395,7 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
     const ok = await armed(page, "kicadCollabTestMoveEndpoint");
     test.skip(!ok, "wasm build predates the ysync repro hooks");
 
-    const queued = await page.evaluate(
+    const queued = await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestMoveEndpoint(i: string, dx: number, dy: number): boolean } })
           .Module.kicadCollabTestMoveEndpoint(id, 5_000_000, 0),
@@ -442,7 +432,7 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
     );
     test.skip(!has, "wasm build predates the ysync repro hooks");
 
-    const queued = await page.evaluate(
+    const queued = await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestRemoveItem(i: string): boolean } })
           .Module.kicadCollabTestRemoveItem(id),
@@ -462,7 +452,7 @@ test.describe("pcbnew ysync repros (v2 items wire, single tab)", () => {
     const ok = await armed(page, "kicadCollabTestRemoveItem");
     test.skip(!ok, "wasm build predates the ysync repro hooks");
 
-    await page.evaluate(
+    await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestRemoveItem(i: string): boolean } })
           .Module.kicadCollabTestRemoveItem(id),

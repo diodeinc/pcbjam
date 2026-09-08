@@ -3,6 +3,8 @@ import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import { test, expect } from './fixtures';
 import { hideCursor } from './utils/screenshot-compare';
+import { collabEvaluate } from './utils/collab-lock';
+import { captureLocalItems } from './utils/capture-items';
 
 /**
  * Eeschema "R" rotate regression (reported 2026-09-02, local wasm editor).
@@ -172,7 +174,7 @@ function changedShare(a: Buffer, b: Buffer): number {
 
 /** The symbol's `(at x y ROT)` as the bridge sees it right now. */
 async function symbolRotationFromBridge(page: Page): Promise<number> {
-    const sexprs: string[] = await page.evaluate(() => {
+    const sexprs: string[] = await collabEvaluate(page, () => {
         const w = window as unknown as WxWindow;
         const wire = JSON.parse(w.Module.kicadCollabSnapshotItems()) as {
             added: { sexpr: string }[];
@@ -232,6 +234,135 @@ async function orientationShownInPanel(page: Page): Promise<string[]> {
 }
 
 test.describe('Eeschema rotate (R)', () => {
+    for (const overlap of [false, true]) {
+    test(`host undo and redo work while the rotated symbol stays selected${overlap ? ' during a production checkpoint' : ''}`, async ({ page }) => {
+        await bootWithSchematic(page);
+        await captureLocalItems(page, SAMPLE_SCH);
+        await page.keyboard.press('Control+a');
+        await page.keyboard.press('r');
+        // Real UI save proves the edit landed without clearing selection or
+        // invoking a forbidden native snapshot outside the checkpoint lock.
+        expect(await symbolRotationFromSave(page), 'R committed one rotation').toBe(90);
+        await page.keyboard.press('Control+z');
+        await expect.poll(() => symbolRotationFromBridge(page), {
+            timeout: 15000,
+            message: 'host undo must not wait for Escape/deselection',
+        }).toBe(0);
+        expect(await symbolRotationFromSave(page), 'settled undo is saved through Ctrl+S').toBe(0);
+        const selected = () => collabEvaluate(page, () => JSON.parse((window as unknown as {
+            Module: { kicadCollabGetSelection(): string };
+        }).Module.kicadCollabGetSelection()));
+        expect(await selected()).toEqual([SYMBOL_UUID]);
+        if (overlap) {
+            await page.evaluate(() => {
+                const w = window as unknown as {
+                    Module: { kicadCollabSnapshotItems(): string | Promise<string> };
+                    kicadCollab: { onHistory(direction: string): void; onChanged(): void };
+                    __snapshotHeld?: boolean;
+                    __releaseSnapshot?: () => void;
+                    __historyCalls: string[];
+                };
+                const original = w.Module.kicadCollabSnapshotItems;
+                const onHistory = w.kicadCollab.onHistory;
+                w.__historyCalls = [];
+                w.kicadCollab.onHistory = (direction) => {
+                    w.__historyCalls.push(direction);
+                    onHistory(direction);
+                };
+                // Extend one awaited boundary of the actual production render.
+                // The adapter, NOT collabEvaluate, owns the mandatory lock.
+                w.Module.kicadCollabSnapshotItems = () => {
+                    w.Module.kicadCollabSnapshotItems = original;
+                    const snapshot = original();
+                    w.__snapshotHeld = true;
+                    return new Promise<string>(resolve => {
+                        w.__releaseSnapshot = () => resolve(snapshot);
+                    });
+                };
+                w.kicadCollab.onChanged();
+            });
+            await page.waitForFunction(() => (window as unknown as { __snapshotHeld: boolean }).__snapshotHeld);
+        }
+        // KiCad's non-Mac (including WASM) default Redo shortcut.
+        await page.keyboard.press('Control+y');
+        if (overlap) {
+            // Let wx dispatch the real key with the checkpoint still held.
+            await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+            expect(await page.evaluate(() => (window as unknown as { __historyCalls: string[] }).__historyCalls)).toEqual([]);
+            await page.evaluate(() => (window as unknown as { __releaseSnapshot(): void }).__releaseSnapshot());
+        }
+        await expect.poll(() => symbolRotationFromBridge(page), {
+            timeout: 15000,
+            message: 'host redo restores the rotation without losing selection',
+        }).toBe(90);
+        expect(await symbolRotationFromSave(page), 'settled redo is saved through Ctrl+S').toBe(90);
+        expect(await selected()).toEqual([SYMBOL_UUID]);
+        if (overlap) {
+            expect(await page.evaluate(() => (window as unknown as { __historyCalls: string[] }).__historyCalls)).toEqual(['redo']);
+        }
+        const depth = await page.evaluate(() => (window as unknown as {
+            Module: { kicadCollabTestUndoDepth(): number };
+        }).Module.kicadCollabTestUndoDepth());
+        expect(depth, 'collaborative edits never retain native picker history').toBe(0);
+    });
+    }
+
+    test('selected symbol survives peer replacement and local undo without resurrecting a peer deletion', async ({ page, testLogger }, testInfo) => {
+        await bootWithSchematic(page);
+        await captureLocalItems(page, SAMPLE_SCH);
+        await page.keyboard.press('Control+a');
+        await page.keyboard.press('r');
+        expect(await symbolRotationFromSave(page)).toBe(90);
+        const wire = await collabEvaluate(page, () => JSON.parse(
+            (window as unknown as WxWindow).Module.kicadCollabSnapshotItems()
+        )) as { added: { sexpr: string; parent: null }[] };
+        const symbol = wire.added.find(item => item.sexpr.includes(SYMBOL_UUID));
+        expect(symbol, 'selected symbol is available at a safe idle checkpoint').toBeTruthy();
+        expect(symbol!.sexpr).toContain('"10k"');
+        await page.evaluate((sexpr) => (window as unknown as {
+            KicadCollabV2: { applyPeerItems(wire: string): void };
+        }).KicadCollabV2.applyPeerItems(JSON.stringify({
+            added: [], changed: [{ sexpr }], removed: [],
+        })), symbol!.sexpr.replace('"10k"', '"22k"'));
+        const savedText = () => page.evaluate((path) => new TextDecoder().decode(
+            (window as unknown as WxWindow).FS.readFile(path)
+        ), SCH_PATH);
+        // Observe completion without issuing Save concurrently with native
+        // apply/history. Non-history input is intentionally excluded under the
+        // render lock. Keep the independent real-save assertions once settled.
+        await expect.poll(() => collabEvaluate(page, () => {
+            const snapshot = JSON.parse((window as unknown as WxWindow).Module.kicadCollabSnapshotItems());
+            return snapshot.added.map((item: { sexpr: string }) => item.sexpr).join('\n');
+        })).toContain('"22k"');
+        await page.keyboard.press('Control+z');
+        await expect.poll(() => symbolRotationFromBridge(page)).toBe(0);
+        expect(await symbolRotationFromSave(page)).toBe(0);
+        expect(await savedText(), 'local undo preserves the peer Value field').toContain('"22k"');
+        const selected = await collabEvaluate(page, () => JSON.parse((window as unknown as {
+            Module: { kicadCollabGetSelection(): string };
+        }).Module.kicadCollabGetSelection()));
+        expect(selected, 'replacement and undo preserve the selected UUID').toContain(SYMBOL_UUID);
+        await page.screenshot({ path: testInfo.outputPath('selected-peer-undo.png') });
+
+        await page.evaluate((id) => (window as unknown as {
+            KicadCollabV2: { applyPeerItems(wire: string): void };
+        }).KicadCollabV2.applyPeerItems(JSON.stringify({ added: [], changed: [], removed: [id] })), SYMBOL_UUID);
+        const symbolExists = () => collabEvaluate(page, (id) => {
+            const snapshot = JSON.parse((window as unknown as WxWindow).Module.kicadCollabSnapshotItems());
+            return snapshot.added.some((item: { sexpr: string }) => item.sexpr.includes(id));
+        }, SYMBOL_UUID);
+        await expect.poll(symbolExists).toBe(false);
+        const redoDepth = () => page.evaluate(() => (window as unknown as {
+            __collabV2: { binding: { historyState: { redo: number } } };
+        }).__collabV2.binding.historyState.redo);
+        expect(await redoDepth(), 'the local rotation is still on the host redo stack').toBe(1);
+        await page.keyboard.press('Control+y');
+        await expect.poll(redoDepth, { message: 'redo request was actually processed' }).toBe(0);
+        await page.keyboard.press('Control+s');
+        expect(await symbolExists(), 'redo must not resurrect the peer-deleted symbol').toBe(false);
+        expect([...testLogger.consoleLogs, ...testLogger.errors].filter(line => /Aborted\(|unreachable|memory access out of bounds/.test(line))).toEqual([]);
+    });
+
     test('one R press on a selected symbol rotates it once and repaints the canvas', async ({
         page,
     }) => {
@@ -251,6 +382,9 @@ test.describe('Eeschema rotate (R)', () => {
 
         const after = await page.screenshot({ clip: box });
         const share = changedShare(before, after);
+        // Snapshot checkpoints require an idle schematic selection tool. Capture
+        // repaint evidence first, then clear selection without changing the edit.
+        await page.keyboard.press('Escape');
         const rotBridge = await symbolRotationFromBridge(page);
         console.log(`[rotate-spec] hotkey: bridge rot=${rotBridge} canvasChanged=${(share * 100).toFixed(2)}%`);
 
@@ -275,7 +409,7 @@ test.describe('Eeschema rotate (R)', () => {
         expect(await symbolRotationFromBridge(page), 'pristine symbol orientation').toBe(0);
         const before = await page.screenshot({ clip: box });
 
-        const ok = await page.evaluate(
+        const ok = await collabEvaluate(page,
             (uuid) => (window as unknown as WxWindow).Module.kicadCollabTestRotateItem(uuid, 90),
             SYMBOL_UUID
         );
