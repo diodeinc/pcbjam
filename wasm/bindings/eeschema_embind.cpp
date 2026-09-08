@@ -1478,8 +1478,16 @@ std::string schCollabTestMoveFirst( int aDx, int aDy )
 
         for( SCH_ITEM* item : screen->Items() )
         {
-            fr->CallAfter( [fr, item, screen, aDx, aDy]() { collabTestMove( fr, item, screen, aDx, aDy ); } );
-            return toUtf8( item->m_Uuid.AsString() );
+            const std::string id = toUtf8( item->m_Uuid.AsString() );
+            pcbjam_collab::runOnCoroutine( fr, [fr, id, aDx, aDy]() {
+                SCH_SHEET_PATH path;
+                SCH_ITEM* live = fr->Schematic().ResolveItem(
+                        KIID( wxString::FromUTF8( id.c_str() ) ), &path, /*allowNull*/ true );
+
+                if( live )
+                    collabTestMove( fr, live, path.LastScreen(), aDx, aDy );
+            } );
+            return id;
         }
     }
 
@@ -1944,7 +1952,7 @@ std::string schCollabTestAddSymbol( std::string aLibId, int aX, int aY, std::str
     return id;
 }
 
-// By-uuid variant of MoveFirst (same CallAfter + devirtualized move path).
+// By-uuid variant of MoveFirst (same apply coroutine + devirtualized move path).
 bool schCollabTestMoveSchItem( std::string aId, int aDx, int aDy )
 {
     SCH_EDIT_FRAME* fr = schFrame();
@@ -1961,7 +1969,9 @@ bool schCollabTestMoveSchItem( std::string aId, int aDx, int aDy )
     // between and the captured pointer would be dangling — the commit would
     // resurrect a deleted item (drift-trio S4 move-vs-delete). Vanished =>
     // the move loses, silently.
-    fr->CallAfter( [fr, aId, aDx, aDy]() {
+    // Use the apply coroutine so a host lock remains held through the commit,
+    // including any JSPI suspension, and its deferred tool events are drained.
+    pcbjam_collab::runOnCoroutine( fr, [fr, aId, aDx, aDy]() {
         SCH_SHEET_PATH path;
         SCH_ITEM* item = fr->Schematic().ResolveItem( KIID( wxString::FromUTF8( aId.c_str() ) ),
                                                       &path, /*allowNull*/ true );
