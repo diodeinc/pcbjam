@@ -36,6 +36,21 @@ permissions:
   contents: read
 
 jobs:
+  embedded-editor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: corepack enable
+      - run: pnpm -C apps/embedded-editor install --frozen-lockfile
+      - run: pnpm -C apps/embedded-editor typecheck
+      # Includes a fixture distribution build and source/notice integrity tests;
+      # no private host checkout or native build is needed for this app gate.
+      - run: pnpm -C apps/embedded-editor test
+
   build:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'diodeinc/pcbjam'
     uses: ./.github/workflows/wasm-build.yml
