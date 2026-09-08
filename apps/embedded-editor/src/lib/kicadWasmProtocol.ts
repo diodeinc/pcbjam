@@ -25,6 +25,7 @@ export type KicadWasmCommand =
   | "unlock"
   | "apply-items"
   | "prepare-items"
+  | "capture-items"
   | "snapshot-items"
   | "snapshot-state"
   | "set-history-state"

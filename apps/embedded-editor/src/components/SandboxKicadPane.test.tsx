@@ -25,6 +25,7 @@ const mock = vi.hoisted(() => ({
   frame: {
     tryLock: vi.fn(),
     unlock: vi.fn(),
+    captureItems: vi.fn(),
     snapshotItems: vi.fn(),
     prepareItems: vi.fn(),
     snapshotState: vi.fn(),
@@ -118,6 +119,11 @@ async function setup(options: { server?: Y.Doc; draft?: KicadDraft; readOnly?: b
   mock.frame.tryLock.mockResolvedValue(true);
   mock.frame.unlock.mockResolvedValue(undefined);
   mock.frame.snapshotItems.mockImplementation(async () => snapshot(native));
+  mock.frame.captureItems.mockImplementation(async () => {
+    if (!(await mock.frame.tryLock())) return null;
+    try { return await mock.frame.snapshotItems(); }
+    finally { await mock.frame.unlock(); }
+  });
   mock.frame.prepareItems.mockResolvedValue(undefined);
   mock.frame.snapshotState.mockImplementation(async () => ({
     committed: snapshot(native),
@@ -178,8 +184,10 @@ async function setup(options: { server?: Y.Doc; draft?: KicadDraft; readOnly?: b
 
 it("syncs captured edits and remote updates while a hidden renderer RPC is suspended", async () => {
   const { server, native, visibility, tick, container } = await setup();
-  const unlock = deferred();
-  mock.frame.unlock.mockImplementationOnce(() => unlock.promise);
+  const chrome = deferred();
+  // Capture now releases its lock before returning. Suspend the following
+  // renderer RPC, after the app actually receives the captured edit.
+  mock.frame.setHistoryState.mockImplementationOnce(() => chrome.promise);
   await act(async () => {
     move(native, 20);
     mock.props!.onChanged!();
@@ -202,7 +210,7 @@ it("syncs captured edits and remote updates while a hidden renderer RPC is suspe
 
   await act(async () => {
     visibility(false);
-    unlock.resolve();
+    chrome.resolve();
   });
   await tick();
   expect(snapshot(native)).toBe(snapshot(server));
@@ -319,6 +327,19 @@ it("reports storage failure, stops writes, and warns before abandoning the in-me
   const event = new Event("beforeunload", { cancelable: true });
   window.dispatchEvent(event);
   expect(event.defaultPrevented).toBe(true);
+});
+
+it("captures idle state without a parent-owned lock window", async () => {
+  const { native, tick } = await setup();
+  mock.frame.captureItems.mockResolvedValue(snapshot(native));
+  mock.frame.tryLock.mockClear();
+  mock.frame.unlock.mockClear();
+  mock.frame.snapshotItems.mockClear();
+  await tick();
+  expect(mock.frame.captureItems).toHaveBeenCalled();
+  expect(mock.frame.tryLock).not.toHaveBeenCalled();
+  expect(mock.frame.unlock).not.toHaveBeenCalled();
+  expect(mock.frame.snapshotItems).not.toHaveBeenCalled();
 });
 
 it("requires the native lock before capturing, preparing, or applying updates", async () => {

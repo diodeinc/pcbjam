@@ -1,5 +1,17 @@
 import { useState } from "react";
 import type { KicadToolbarCommand, KicadToolbarState } from "../lib/kicadToolbar";
+
+export function EditorAbout() {
+  return <details className="editor-about">
+    <summary>About</summary>
+    <div className="about-content">
+      <strong>PCBJam board editor</strong>
+      <p>Powered by KiCad and wxWidgets.</p>
+      <a href="./licenses.html" target="_blank" rel="noreferrer">Licenses · GPL · Source</a>
+    </div>
+  </details>;
+}
+
 export function KicadToolbar({state, onCommand, onChoice, error}: {
   state: KicadToolbarState | null; error: string | null;
   onCommand: (command: KicadToolbarCommand) => void;
@@ -15,7 +27,7 @@ export function KicadToolbar({state, onCommand, onChoice, error}: {
           {item.options.map((option, index) => <option value={index} key={index} disabled={option === "---"}>{option}</option>)}
         </select>)}
     </div>)}
-    {state && <details><summary>Commands</summary><input aria-label="Find a board command" placeholder="Find a board command…" value={search} onChange={e => setSearch(e.target.value)} />
+    {state && <details className="board-commands"><summary>Commands</summary><input aria-label="Find a board command" placeholder="Find a board command…" value={search} onChange={e => setSearch(e.target.value)} />
       <div className="command-list">{state.commands.filter(c => `${c.label} ${c.group}`.toLowerCase().includes(search.toLowerCase())).map(c => <button key={c.id} disabled={!c.enabled} onClick={() => onCommand(c)}>{c.checked ? "✓ " : ""}{c.label} <small>{c.group}</small></button>)}</div>
     </details>}
     {error && <div role="alert">{error}</div>}

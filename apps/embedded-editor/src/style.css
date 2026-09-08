@@ -1,22 +1,36 @@
 /* PCBJam-local chrome; no Registry styles, fonts, or services. */
-:root { color-scheme: light; --paper-bg:#fafafa; --paper-surface:#ffffff; --hover-surface:#ededed; --line:#dddddd; --line-strong:#999999; --ink:#18181b; --muted-ink:#666666; --diode-green:#17764a; --diode-green-foreground:#ffffff; --diode-green-surface:#e1f4e9; --danger-ink:#b91c1c; --radius-control:5px; --font-chrome-stack:Arial,sans-serif; --data-table-cell-font-size:13px; }
-:root[data-theme=dark] { color-scheme:dark; --paper-bg:#18181b; --paper-surface:#242428; --hover-surface:#353539; --line:#424247; --line-strong:#777777; --ink:#fafafa; --muted-ink:#aaaaaa; --diode-green:#70ce9b; --diode-green-foreground:#111111; --diode-green-surface:#183b28; --danger-ink:#fca5a5; }
+/* System mono intentionally replaces Registry's privately licensed Berkeley Mono. */
+:root { color-scheme: light; --paper-bg:#fffdfa; --paper-surface:#f8f5ef; --hover-surface:#f4efe6; --line:#e5ded0; --line-strong:#cec5b4; --ink:#1f2328; --muted-ink:#51535a; --diode-green:#00a876; --diode-green-foreground:#1f2328; --diode-green-surface:#00a8761a; --danger-ink:#b91c1c; --radius-control:4px; --font-chrome-stack:ui-monospace,"SF Mono",Menlo,Monaco,Consolas,"Liberation Mono",monospace; --data-table-cell-font-size:11px; }
+:root[data-theme=dark] { color-scheme:dark; --paper-bg:#121212; --paper-surface:#181716; --hover-surface:#201f1e; --line:#2a2927; --line-strong:#3a3834; --ink:#e7e3dc; --muted-ink:#a8a39a; --diode-green:#01d492; --diode-green-foreground:#121212; --diode-green-surface:#01d4921a; --danger-ink:#f87777; }
+/* No light surface or branded wait screen before the host supplies its theme. */
+html:not([data-theme]) { color-scheme:normal; background:transparent; }
+html:not([data-theme]) body { background:transparent; }
+.host-wait { visibility:hidden; }
 * { box-sizing:border-box; }
 html,body,#root,main { margin:0; width:100%; height:100%; overflow:hidden; }
-body { font:13px Arial,sans-serif; background:var(--paper-bg); color:var(--ink); }
-main { display:flex; flex-direction:column; }
-header { display:flex; align-items:center; gap:12px; padding:8px 12px; border-bottom:1px solid var(--line); flex-shrink:0; }
-header strong { font-size:18px; } header a { margin-left:auto; } a { color:var(--diode-green); }
+body { font:var(--data-table-cell-font-size)/1.55 var(--font-chrome-stack); background:var(--paper-bg); color:var(--ink); }
+main { display:flex; flex-direction:column; position:relative; }
+header { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:4px 8px; background:var(--paper-surface); border-bottom:1px solid var(--line); flex-shrink:0; }
+header strong { font-size:inherit; } a { color:var(--diode-green); }
 button,select,input,.file-button { font:inherit; border:1px solid var(--line); border-radius:var(--radius-control); color:var(--ink); background:var(--paper-surface); padding:5px 8px; }
 button,.file-button,summary { cursor:pointer; } button:hover { background:var(--hover-surface); } button:disabled { opacity:.45; cursor:default; }
+button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible,.file-button:focus-within { outline:2px solid var(--diode-green); outline-offset:2px; }
 button[aria-pressed=true] { background:var(--diode-green-surface); }
 .file-button { position:relative; overflow:hidden; } .file-button input { position:absolute; inset:0; opacity:0; cursor:pointer; width:100%; }
-.welcome { margin:auto; text-align:center; max-width:620px; padding:24px; } .welcome h1 { font-size:32px; } .welcome p { color:var(--muted-ink); line-height:1.6; }
-.toolbar { flex-shrink:0; position:relative; border-bottom:1px solid var(--line); }
+.welcome { margin:auto; text-align:center; max-width:620px; padding:24px; } .welcome h1 { font-size:1.5em; } .welcome p { color:var(--muted-ink); line-height:1.6; }
+.toolbar { flex-shrink:0; position:relative; background:var(--paper-surface); border-bottom:1px solid var(--line); }
 .toolbar-row { display:flex; align-items:center; overflow-x:auto; gap:3px; padding:3px 6px; }
 .toolbar-row button { display:inline-flex; align-items:center; flex-shrink:0; padding:3px; border-color:transparent; }
 .toolbar-row select { max-width:190px; } .separator { border-left:1px solid var(--line); height:20px; margin:0 4px; }
-details { padding:3px 8px; } details[open] { position:absolute; right:8px; top:0; width:330px; max-height:65vh; overflow:auto; background:var(--paper-surface); border:1px solid var(--line); z-index:10; }
+.board-commands { padding:3px 8px; } .board-commands[open] { position:absolute; right:8px; top:0; width:330px; max-width:calc(100% - 16px); max-height:65vh; overflow:auto; background:var(--paper-surface); border:1px solid var(--line); z-index:10; }
+.editor-about { margin-left:auto; flex-shrink:0; z-index:20; }
+.editor-about summary { padding:4px 8px; color:var(--muted-ink); }
+.editor-about summary:hover { background:var(--hover-surface); }
+.about-content { position:absolute; right:8px; top:100%; width:280px; max-width:calc(100vw - 16px); padding:12px; border:1px solid var(--line); border-radius:var(--radius-control); background:var(--paper-surface); color:var(--ink); }
+header { position:relative; }
+.embedded > .editor-about { position:absolute; top:0; right:0; }
+/* Share the existing filename/status strip; do not add another embedded row. */
+.embedded > [data-kicad-state] > :first-child { padding-right:76px; background:var(--paper-surface); }
 .command-list { display:flex; flex-direction:column; gap:3px; } .command-list button { text-align:left; } small { color:var(--muted-ink); }
 [role=alert] { color:var(--danger-ink); padding:8px 12px; }
 .flex { display:flex; } .flex-col { flex-direction:column; } .flex-1 { flex:1; } .h-full { height:100%; } .min-h-0 { min-height:0; } .shrink-0 { flex-shrink:0; } .items-center { align-items:center; } .gap-2 { gap:8px; } .px-2 { padding-inline:8px; } .h-7 { min-height:28px; } .border-b { border-bottom:1px solid var(--line); } .mr-auto { margin-right:auto; } .ml-auto { margin-left:auto; } .truncate { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .text-mutedInk { color:var(--muted-ink); } .tooltip-content { display:none; }

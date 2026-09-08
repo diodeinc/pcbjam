@@ -111,6 +111,17 @@ or synthetic editing commands are used to mask this native repaint issue.
 
 ## Embedded capability protocol
 
+Embedded mode keeps a compact filename/status strip and monochrome typography,
+without the standalone PCBJam banner. The app owns its palette and uses system
+monospace fonts, not the host's licensed font assets. Licensing and exact source
+downloads remain available under **About** in both modes. Initial host theme is
+applied before mounting the renderer.
+
+Routine captures acquire, snapshot, and release the native lock within one
+renderer request; parent messaging and snapshot diffing happen after unlock.
+History and remote applies retain their longer locked transaction paths. No
+native input is replayed, and no snapshot is taken without the native lock.
+
 URL: `index.html?session=…&nonce=…&parentOrigin=https%3A%2F%2Fhost.example`.
 Use unique opaque session/nonce values and exact HTTP(S) parent origin (no path).
 All outer messages: `{protocol:'diode-pcbjam-app-v1',session,nonce,type,requestId?,payload?}`.

@@ -26,6 +26,7 @@ export interface KicadWasmFrameHandle {
   unlock(): Promise<void>;
   applyItems(delta: string): Promise<void>;
   prepareItems(delta: string): Promise<void>;
+  captureItems(): Promise<string | null>;
   snapshotItems(): Promise<string>;
   snapshotState(delta: string): Promise<{ committed: string; working: string }>;
   setReadOnly(readOnly: boolean): Promise<void>;
@@ -180,6 +181,7 @@ export const KicadWasmFrame = forwardRef<
     applyItems: async (delta) => void (await request("apply-items", { delta })),
     prepareItems: async (delta) =>
       void (await request("prepare-items", { delta })),
+    captureItems: async () => (await request("capture-items")) as string | null,
     snapshotItems: async () => (await request("snapshot-items")) as string,
     snapshotState: async (delta) =>
       (await request("snapshot-state", { delta })) as {

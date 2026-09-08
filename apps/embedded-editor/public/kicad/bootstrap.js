@@ -334,6 +334,20 @@ var progressBar = null;
       if (accepted) window.focus();
       return accepted;
     }
+    if (type === "capture-items") {
+      // Routine polling must not keep input excluded across parent-frame RPCs
+      // or the parent's snapshot diff/Yjs work. Keep the native lock mandatory,
+      // but release it here before the captured snapshot leaves this frame.
+      if (renderLocked || !requireFunction("kicadCollabTryLock")()) return null;
+      renderLocked = true;
+      try {
+        return await snapshotItems();
+      } finally {
+        await waitForCollab();
+        requireFunction("kicadCollabUnlock")();
+        renderLocked = false;
+      }
+    }
     if (type === "try-lock") {
       var acquired = requireFunction("kicadCollabTryLock")();
       if (acquired) renderLocked = true;

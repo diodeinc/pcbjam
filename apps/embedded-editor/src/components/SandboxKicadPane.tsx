@@ -177,9 +177,9 @@ export function SandboxKicadPane({
     };
     window.addEventListener("beforeunload", onBeforeUnload);
 
-    const captureLocal = async () => {
+    const captureLocal = async (captured?: string) => {
       if (!ready.current || !frame.current) return;
-      const snapshot = await frame.current.snapshotItems();
+      const snapshot = captured ?? await frame.current.snapshotItems();
       if (disposed || failed.current) return;
       if (nativeSnapshot.current !== null) {
         acceptItems(diffItemSnapshots(nativeSnapshot.current, snapshot));
@@ -205,7 +205,14 @@ export function SandboxKicadPane({
       try {
         // Native snapshots subtract pending COMMIT images, so previews never
         // enter durable Yjs history even while an interactive tool is active.
-        const settled = await frame.current.tryLock();
+        if (!historyRequests.current.length) {
+          const captured = await frame.current.captureItems();
+          if (captured !== null) await captureLocal(captured);
+        }
+        if (disposed || failed.current) return;
+        // History still captures and executes under the existing native lock.
+        // Include intents delivered during the batched capture's unlock.
+        const settled = historyRequests.current.length > 0 && await frame.current.tryLock();
         if (settled) {
           try {
             await captureLocal();

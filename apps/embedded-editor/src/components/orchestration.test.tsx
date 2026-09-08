@@ -31,6 +31,11 @@ async function setup() {
     snapshotItems:vi.fn(async () => native.snapshot), setHistoryState:vi.fn(async () => {}),
     setReadOnly:vi.fn(async () => {}),
   };
+  native.handles.captureItems = vi.fn(async () => {
+    if (!(await native.handles.tryLock())) return null;
+    try { return await native.handles.snapshotItems(); }
+    finally { await native.handles.unlock(); }
+  });
   const server = seedKicadDoc(base); const update = updateBase64(server); server.destroy();
   const host = {
     request:vi.fn(async (method:string): Promise<unknown> => method === "draft-load" ? null : undefined),

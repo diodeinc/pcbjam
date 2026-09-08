@@ -123,9 +123,18 @@ it("locks initial snapshots and excludes chrome input only while a render lock i
   }
   idle = false;
   expect(await request("try-lock")).toBe(false);
+  expect(await request("capture-items")).toBeNull();
+  expect(snapshot).toHaveBeenCalledOnce();
   expect(inputBlocked("keydown")).toBe(false);
   idle = true;
+  expect(await request("capture-items")).toBe(JSON.stringify({ added: [], changed: [], removed: [] }));
+  expect(locked).toBe(false);
+  expect(inputBlocked("pointermove")).toBe(false);
   expect(await request("try-lock")).toBe(true);
+  const count = snapshot.mock.calls.length;
+  expect(await request("capture-items")).toBeNull();
+  expect(snapshot).toHaveBeenCalledTimes(count);
+  expect(locked).toBe(true); // Never releases an existing caller's lock.
   expect(inputBlocked("keydown")).toBe(true);
   expect(inputBlocked("click")).toBe(true);
   expect(await request("toolbar-state")).toBeNull();
@@ -146,6 +155,13 @@ it("locks initial snapshots and excludes chrome input only while a render lock i
   expect(window.focus).toHaveBeenCalledOnce();
   expect(await request("toolbar-choice", { id: 4, selected: 2 })).toBe(true);
   expect(context.Module.kicadWebToolbarChoice).toHaveBeenCalledWith(4, 2);
+
+  snapshot.mockImplementationOnce(() => {
+    expect(locked).toBe(true);
+    throw new Error("Snapshot failed");
+  });
+  await request("capture-items");
+  expect(locked).toBe(false);
 
   const queueHistoryKey = context.Module.kicadCollabQueueHistoryKey;
   expect(queueHistoryKey).not.toHaveBeenCalled();
