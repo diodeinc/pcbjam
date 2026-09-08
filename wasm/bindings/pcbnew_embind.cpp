@@ -37,6 +37,7 @@
 #include <dsnlexer.h>
 #include <tools/pcb_selection.h>
 #include <tools/pcb_selection_tool.h>
+#include <tools/drawing_tool.h>
 #include <router/router_tool.h>
 #include <settings/color_settings.h>
 #include <widgets/appearance_controls.h>
@@ -1348,7 +1349,9 @@ void doReconcileItems( PCB_EDIT_FRAME* frame, const json& wire )
     std::vector<std::pair<PCB_GROUP*, std::vector<KIID>>> groups;
 
     auto* router = frame->GetToolManager()->GetTool<ROUTER_TOOL>();
+    auto* drawing = frame->GetToolManager()->GetTool<DRAWING_TOOL>();
     if( router ) router->PrepareCollab();
+    if( drawing ) drawing->PrepareTuningCollab();
     collabRebaseCopies( board, wire.at( "committed" ) );
     s_applyingRemote = true;
     for( const auto& id : wire.value( "removed", json::array() ) )
@@ -1414,6 +1417,7 @@ void doReconcileItems( PCB_EDIT_FRAME* frame, const json& wire )
     connectivity->RecalculateRatsnest();
     board->OnRatsnestChanged();
     if( router ) router->FinishCollab();
+    if( drawing ) drawing->FinishTuningCollab();
     view->MarkDirty();
     frame->GetCanvas()->Refresh();
     if( !PCBJAM_COLLAB_HISTORY::IsEnabled() ) rebaseline();
@@ -1885,6 +1889,14 @@ void pcbCollabPrepareItems( std::string text )
     json wire = json::parse( text );
     pcbjam_collab::runOnCoroutine( fr, [fr, wire]()
     {
+        auto* router = fr->GetToolManager()->GetTool<ROUTER_TOOL>();
+        auto* drawing = fr->GetToolManager()->GetTool<DRAWING_TOOL>();
+        // These tools release child pointers and resolve prerequisites during reconcile.
+        // An unrelated deletion must not cancel an otherwise replayable routing gesture.
+        if( ( router && router->RoutingInProgress() && router->CanCollabCheckpoint() )
+            || ( drawing && drawing->HasTuningCollab() ) )
+            return;
+
         bool destructive = !wire.value( "removed", json::array() ).empty();
         for( const auto& value : wire.value( "changed", json::array() ) )
         {
@@ -3192,6 +3204,8 @@ static std::string pcbUpdateFromLibraryShim( std::string aKind, std::string aLib
     return pcbUpdateFromLibrary( aLib, aNames );
 }
 
+#include "router_checkpoint_test.h"
+
 EMSCRIPTEN_BINDINGS(pcbnew) {
     // Register vector types for iteration
     register_vector<FOOTPRINT*>("FootprintVector");
@@ -3228,6 +3242,7 @@ EMSCRIPTEN_BINDINGS(pcbnew) {
     function("kicadShow3DViewer", &pcbShow3DViewer);
     // pcbnew-only test helper (no eeschema counterpart — name is not shared).
     function("kicadCollabTestItemBlob", &kicadCollabTestItemBlob);
+    function("kicadCollabTestRouter", &pcbCollabTestRouter);
     // pcbnew-only ysync-review repro hooks (names not shared with eeschema).
     function("kicadCollabTestSetPadSize", &pcbCollabTestSetPadSize);
     function("kicadCollabTestMoveEndpoint", &pcbCollabTestMoveEndpoint);
