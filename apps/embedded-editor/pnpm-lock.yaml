@@ -105,13 +105,16 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@pcbjam/shared@0.1.0': ec738340a031bda3644c2519ab509ab14b08c66772d447d9ca6d8c5a459baa7d
+
 importers:
 
   .:
     dependencies:
       '@pcbjam/shared':
         specifier: github:PCBJam/pcbjam-shared#2f2d374e569f2e6698b1e0bf6b62aeb4acf2c035
-        version: https://codeload.github.com/PCBJam/pcbjam-shared/tar.gz/2f2d374e569f2e6698b1e0bf6b62aeb4acf2c035(@types/node@22.20.1)
+        version: https://codeload.github.com/PCBJam/pcbjam-shared/tar.gz/2f2d374e569f2e6698b1e0bf6b62aeb4acf2c035(patch_hash=ec738340a031bda3644c2519ab509ab14b08c66772d447d9ca6d8c5a459baa7d)(@types/node@22.20.1)
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -921,7 +924,7 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@pcbjam/shared@https://codeload.github.com/PCBJam/pcbjam-shared/tar.gz/2f2d374e569f2e6698b1e0bf6b62aeb4acf2c035(@types/node@22.20.1)':
+  '@pcbjam/shared@https://codeload.github.com/PCBJam/pcbjam-shared/tar.gz/2f2d374e569f2e6698b1e0bf6b62aeb4acf2c035(patch_hash=ec738340a031bda3644c2519ab509ab14b08c66772d447d9ca6d8c5a459baa7d)(@types/node@22.20.1)':
     dependencies:
       '@ts-rest/core': 3.52.1(@types/node@22.20.1)(zod@3.25.76)
       yjs: 13.6.32

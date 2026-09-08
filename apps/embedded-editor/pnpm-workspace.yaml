@@ -1,2 +1,4 @@
 allowBuilds:
   esbuild: true
+patchedDependencies:
+  '@pcbjam/shared@0.1.0': patches/@pcbjam__shared@0.1.0.patch

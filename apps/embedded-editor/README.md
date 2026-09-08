@@ -7,6 +7,17 @@ live here. No proprietary auth, sandbox client, storage, or UI package is import
 `src/lib/collab.ts` contains the extracted collaboration helpers; MIT dependency
 attributions are in `NOTICE.js` and the generated third-party notices.
 
+`patches/@pcbjam__shared@0.1.0.patch` patches the **MIT-licensed shared
+TypeScript dependency**, applied by `patchedDependencies` in the app's
+`pnpm-workspace.yaml` (pnpm 12 ignores package.json's `pnpm` settings) and pinned
+in the lockfile. It is not a native KiCad source workaround or a WASM modification.
+Its `updateAttrOrder` repair preserves common prefix/suffix Y.Array identities
+instead of replacing the entire order: Undo must not delete an unchanged leading
+footprint name and restore it after incoming native metadata. It preserves exact
+slot order, not atom-first sorting: `fp_text`'s `hide` and stackup's `addsublayer`
+can legitimately occur between fields. The patch ships in `source.tar` alongside
+the application sources so frozen-lockfile installs reproduce the dependency fix.
+
 **Modification notice — 2026-09-08, Diode contributors:** this is a modified
 GPL application, not unmodified upstream PCBJam. Changes include extracted browser
 coordination, standalone and authenticated iframe hosting, native toolbar
@@ -130,7 +141,10 @@ network sync, which awaits durable draft writes but never native rendering.
 
 `pnpm -C apps/embedded-editor test` covers protocol authentication, recovery,
 durable-before-send orchestration, native input/history lock and queue invariants,
-toolbar payload validation and bounded diagnostics. Native WASM integration
+toolbar payload validation and bounded diagnostics. Collaboration regressions use
+the real local branch helpers, untracked server normalization, Undo/Redo and peer
+convergence, checking exact footprint and interleaved `fp_text hide` body order
+against independently authored KiCad inputs. Native WASM integration
 requires the published runtime; unit harnesses do not claim real native coverage.
 The same command also runs executable packaging fixture tests: exact valid release,
 mixed runtime bytes, wrong archive pin, mixed license/metadata sidecars, inconsistent

@@ -1,0 +1,33 @@
+diff --git a/src/kicad-y2.ts b/src/kicad-y2.ts
+index 549e09cdcc6586be7f4e4aecd9d810509fd6f123..ba6f33f19177eff229ba24f7cb5d74ba107d2f89 100644
+--- a/src/kicad-y2.ts
++++ b/src/kicad-y2.ts
+@@ -402,11 +402,24 @@ function updateAttrOrder(
+     mirror.splice(pos, 0, key);
+   });
+ 
+-  // Verify the read rules over the final state render the target order; a
+-  // mismatch (pure reorder, stale-entry interference) → wholesale rewrite.
++  // Preserve unchanged sequence anchors when repairing an order mismatch.
++  // Replacing the whole array makes Undo delete an unchanged leading argument
++  // and restore it after a peer's subsequently inserted metadata fields.
++  // Keep slot order verbatim: bare atoms can legally follow fields (e.g. hide).
+   if (!sameOrder(normalizedKeys(node), targetKeys)) {
+-    order.delete(0, order.length);
+-    order.insert(0, targetKeys);
++    const current = order.toArray();
++    let start = 0;
++    while (start < current.length && start < targetKeys.length &&
++           current[start] === targetKeys[start]) start++;
++    let end = current.length;
++    let targetEnd = targetKeys.length;
++    while (end > start && targetEnd > start &&
++           current[end - 1] === targetKeys[targetEnd - 1]) {
++      end--;
++      targetEnd--;
++    }
++    if (end > start) order.delete(start, end - start);
++    if (targetEnd > start) order.insert(start, targetKeys.slice(start, targetEnd));
+   }
+ }
+ 

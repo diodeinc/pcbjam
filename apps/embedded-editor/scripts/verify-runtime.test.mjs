@@ -122,6 +122,15 @@ test("packages exact notices, sources and a complete repeatable inventory", asyn
     expect(html).toContain("2026-09-08");
     expect(html).toContain('href="MODIFICATIONS.txt"');
     const tar = execFileSync("tar", ["-tf", join(dist, "source.tar")], { encoding: "utf8" });
+    const patch = "patches/@pcbjam__shared@0.1.0.patch";
+    for (const name of [patch, "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]) {
+      const path = `apps/embedded-editor/${name}`;
+      expect(tar).toContain(path);
+      expect(execFileSync("tar", ["-xOf", join(dist, "source.tar"), `./${path}`])).toEqual(await readFile(join(app, name)));
+      expect(await readFile(join(dist, "source", path))).toEqual(await readFile(join(app, name)));
+    }
+    const workspace = await readFile(join(dist, "source/apps/embedded-editor/pnpm-workspace.yaml"), "utf8");
+    expect(workspace).toContain(`patchedDependencies:\n  '@pcbjam/shared@0.1.0': ${patch}`);
     for (const name of ["verify-runtime.mjs", "verify-runtime.test.mjs", "distribute.mjs"]) {
       const path = `apps/embedded-editor/scripts/${name}`;
       expect(tar).toContain(path);

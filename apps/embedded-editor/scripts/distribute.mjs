@@ -29,7 +29,7 @@ await writeFile(join(dist, "kicad/runtime-build.js"), `window.KICAD_BUILD = ${JS
 const source = join(dist, "source/apps/embedded-editor");
 await rm(join(dist, "source"), { recursive: true, force: true });
 await mkdir(source, { recursive: true });
-for (const name of ["src", "public", "scripts", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json", "vite.config.ts", "index.html", "NOTICE.js", "README.md"]) {
+for (const name of ["src", "public", "scripts", "patches", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json", "vite.config.ts", "index.html", "NOTICE.js", "README.md"]) {
   await cp(join(app, name), join(source, name), { recursive: true });
 }
 await cp(join(root, "LICENSE"), join(dist, "LICENSE"));
