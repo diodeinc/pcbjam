@@ -332,9 +332,29 @@ static bool kicadWebToolbarCommand( int aId )
             menu->SendEvent( aId, current->IsCheckable() ? current->IsChecked() : -1 );
             return;
         }
-        wxCommandEvent event( wxEVT_TOOL, aId );
-        event.SetEventObject( frame );
-        frame->GetEventHandler()->ProcessEvent( event );
+        // Toolbar-only actions (e.g. Rotate) are mapped by ACTION_TOOLBAR,
+        // not by the frame. Match wxAuiToolBar::OnLeftUp: toggle first and
+        // dispatch through the owning toolbar, allowing unhandled events to
+        // propagate to the frame. Re-resolve it after the coroutine boundary
+        // because a menu command may have rebuilt the chrome in the meantime.
+        if( auto* mgr = wxAuiManager::GetManager( frame ) )
+            for( const auto& name : { wxT( "TopMainToolbar" ), wxT( "TopAuxToolbar" ) } )
+            {
+                auto& pane = mgr->GetPane( name );
+                auto* owner = pane.IsOk() ? dynamic_cast<wxAuiToolBar*>( pane.window ) : nullptr;
+                auto* tool = owner ? owner->FindTool( aId ) : nullptr;
+                if( !tool || !owner->GetToolEnabled( aId ) ) continue;
+                wxCommandEvent event( wxEVT_TOOL, aId );
+                event.SetEventObject( owner );
+                if( tool->CanBeToggled() )
+                {
+                    const bool checked = !owner->GetToolToggled( aId );
+                    owner->ToggleTool( aId, checked );
+                    event.SetInt( checked );
+                }
+                owner->GetEventHandler()->ProcessEvent( event );
+                return;
+            }
     } );
     return true;
 }
