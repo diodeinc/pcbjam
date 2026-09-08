@@ -19,7 +19,7 @@ static std::string pcbCollabTestRouter( std::string aCommand )
         pcbjam_collab::runOnCoroutine( fr, [fr, tool, command]()
         {
             const std::string op = command.at( "op" );
-            if( op == "start" ) tool->Reset( RESET_REASON::RUN );
+            if( op == "start" ) tool->Reset( TOOL_BASE::RESET_REASON::RUN );
             PNS::ROUTER* router = tool->Router();
             routerTestOk = false;
             if( router )
