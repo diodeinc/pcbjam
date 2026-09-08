@@ -1046,6 +1046,8 @@ void doApply( SCH_EDIT_FRAME* aFrame, const json& aDelta )
     SCHEMATIC& sch = aFrame->Schematic();
 
     s_applyingRemote = true;
+    auto* selection = aFrame->GetToolManager()->GetTool<SCH_SELECTION_TOOL>();
+    const auto savedSelection = selection->PrepareCollabSelection();
 
     SCH_COMMIT commit( aFrame );
     bool       staged = false;
@@ -1123,6 +1125,7 @@ void doApply( SCH_EDIT_FRAME* aFrame, const json& aDelta )
 
     for( SCH_ITEM* item : removedItems )
         delete item;
+    selection->RestoreCollabSelection( savedSelection );
 
     // The applied remote changes (and any connectivity cleanup they triggered) are now the
     // shared state — fold them into the baseline so the post-apply listener flush doesn't
@@ -1178,6 +1181,8 @@ void doApplyItems( SCH_EDIT_FRAME* aFrame, const json& aWire )
     SCHEMATIC& sch = aFrame->Schematic();
 
     s_applyingRemote = true;
+    auto* selection = aFrame->GetToolManager()->GetTool<SCH_SELECTION_TOOL>();
+    const auto savedSelection = selection->PrepareCollabSelection();
 
     SCH_COMMIT commit( aFrame );
     bool       staged = false;
@@ -1302,6 +1307,7 @@ void doApplyItems( SCH_EDIT_FRAME* aFrame, const json& aWire )
 
     for( SCH_ITEM* item : removedItems )
         delete item;
+    selection->RestoreCollabSelection( savedSelection );
 
     // Fold ONLY the applied uuids into the baseline (echo suppression), then flush:
     // anything else that now differs — a concurrent local edit, the connectivity
@@ -2427,7 +2433,10 @@ bool schCollabCanLock()
     SCH_EDIT_FRAME* fr = schFrame();
     SCH_SELECTION_TOOL* selection =
             fr ? fr->GetToolManager()->GetTool<SCH_SELECTION_TOOL>() : nullptr;
-    return selection && selection->GetSelection().Size() == 0;
+    // The dispatcher still requires the outer idle selection wait and no active
+    // tool/point-editor coroutine. Reconciliation parks and re-resolves selection.
+    // Entered-group editing retains a separate group overlay and is not idle.
+    return selection && !selection->GetEnteredGroup();
 }
 
 
