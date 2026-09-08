@@ -2,6 +2,8 @@ import { execSync } from "node:child_process";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
+import { startV2 } from "./utils/trio";
 
 /**
  * eeschema Yjs collaborative bridge (features/yjs-bridge commit 3).
@@ -97,7 +99,7 @@ test.beforeAll(() => {
 test.describe("eeschema collab bridge — single page", () => {
   test("snapshot reflects schematic by uuid/type/position", async ({ page, testLogger }) => {
     await bootAndOpen(page, "snap");
-    const snap = await page.evaluate(() => JSON.parse(window.Module.kicadCollabSnapshot()));
+    const snap = await collabEvaluate(page, () => JSON.parse(window.Module.kicadCollabSnapshot()));
     const byId = new Map<string, { type: string; x: number; y: number }>(
       snap.added.map((i: { id: string; type: string; x: number; y: number }) => [i.id, i]),
     );
@@ -131,7 +133,7 @@ test.describe("eeschema collab bridge — single page", () => {
     // changed: move WIRE1. A wire reshapes via its endpoints (SetStart/EndPoint) — the same
     // sx/sy/ex/ey form the emit side always produces for a SCH_LINE (a bare x/y Move is a no-op
     // for a line, whose endpoints only move when flagged). Deferred via CallAfter → poll.
-    await page.evaluate(
+    await collabEvaluate(page,
       ({ id, nx, by }) =>
         window.Module.kicadCollabApply(
           JSON.stringify({
@@ -150,7 +152,7 @@ test.describe("eeschema collab bridge — single page", () => {
       .toBe(`${nx},${by}`);
 
     // removed: delete WIRE2.
-    await page.evaluate(
+    await collabEvaluate(page,
       (wire) =>
         window.Module.kicadCollabApply(JSON.stringify({ changed: [], added: [], removed: [wire] })),
       WIRE2,
@@ -163,7 +165,7 @@ test.describe("eeschema collab bridge — single page", () => {
       .toBe("");
 
     // added: a graphic text reconstructs by uuid.
-    await page.evaluate(
+    await collabEvaluate(page,
       (textId) =>
         window.Module.kicadCollabApply(
           JSON.stringify({
@@ -176,7 +178,7 @@ test.describe("eeschema collab bridge — single page", () => {
     );
     await expect
       .poll(
-        async () => (await page.evaluate(() => window.Module.kicadCollabSnapshot())).includes(TEXT_ID),
+        async () => (await collabEvaluate(page, () => window.Module.kicadCollabSnapshot())).includes(TEXT_ID),
         { timeout: 10000, intervals: [250] },
       )
       .toBe(true);
@@ -185,7 +187,7 @@ test.describe("eeschema collab bridge — single page", () => {
     // SCH_COMMIT::Push's CHT_ADD (GAL view->Add of a new shape → an asyncify-era invoke_viii
     // mis-dispatch) when doApply ran off a bare stack; doApply now runs inside a COROUTINE, so
     // the add dispatches like a native draw. stype 1 = SHAPE_T::RECTANGLE, fill 1 = NO_FILL.
-    await page.evaluate(
+    await collabEvaluate(page,
       (rectId) =>
         window.Module.kicadCollabApply(
           JSON.stringify({
@@ -210,7 +212,7 @@ test.describe("eeschema collab bridge — single page", () => {
     );
     await expect
       .poll(
-        async () => (await page.evaluate(() => window.Module.kicadCollabSnapshot())).includes(RECT_ID),
+        async () => (await collabEvaluate(page, () => window.Module.kicadCollabSnapshot())).includes(RECT_ID),
         { timeout: 10000, intervals: [250] },
       )
       .toBe(true);
@@ -235,7 +237,7 @@ test.describe("eeschema collab bridge — two tabs (BroadcastChannel)", () => {
       "flaky on Firefox (~50% even solo): observer move misses the 15s window — chromium covers this; pcbnew twin runs both engines",
     );
     const channel = `ee-collab-e2e-${test.info().workerIndex}`;
-    const bundle = path.resolve(__dirname, "../apps/kicad/collab-bundle.js");
+    const bundle = path.resolve(__dirname, "../apps/kicad/collab-bundle-v2.js");
 
     const tabA = await context.newPage();
     const tabB = await context.newPage();
@@ -243,27 +245,19 @@ test.describe("eeschema collab bridge — two tabs (BroadcastChannel)", () => {
     await bootAndOpen(tabB, "tabB");
     for (const p of [tabA, tabB]) await p.addScriptTag({ path: bundle });
 
-    const startCollab = (p: Page) =>
-      p.evaluate(async (ch) => {
-        const w = window as unknown as {
-          KicadCollab: { start: (m: unknown, win: unknown, o: unknown) => Promise<unknown> };
-          Module: unknown;
-        };
-        await w.KicadCollab.start(w.Module, window, { provider: { kind: "broadcastchannel", settleMs: 500 }, room: ch });
-      }, channel);
-    await startCollab(tabA);
-    await startCollab(tabB);
+    await startV2(tabA, { room: channel, seedText: SAMPLE_SCH });
+    await startV2(tabB, { room: channel, editorMatchesDoc: true });
 
     // Read the pre-move baseline BEFORE triggering the move: TestMoveFirst
     // queues the commit through CallAfter + the apply coroutine, and the drain
     // can land between two consecutive page.evaluate round-trips. A GetPos
     // taken after the call raced that drain (~50% under CI load) and captured
     // the ALREADY-MOVED position, so the not-toBe poll waited on itself.
-    const preSnap = await tabA.evaluate(() => JSON.parse(window.Module.kicadCollabSnapshot()));
+    const preSnap = await collabEvaluate(tabA, () => JSON.parse(window.Module.kicadCollabSnapshot()));
     const prePos = new Map<string, string>(
       preSnap.added.map((i: { id: string; x: number; y: number }) => [i.id, `${i.x},${i.y}`]),
     );
-    const uuid = await tabA.evaluate(() => window.Module.kicadCollabTestMoveFirst(2_000_000, 0));
+    const uuid = await collabEvaluate(tabA, () => window.Module.kicadCollabTestMoveFirst(2_000_000, 0));
     expect(uuid).toMatch(/[0-9a-f-]{36}/);
     const orig = prePos.get(uuid);
     expect(orig, "moved item present in pre-move snapshot").toBeTruthy();

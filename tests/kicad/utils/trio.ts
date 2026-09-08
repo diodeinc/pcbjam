@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { collabEvaluate } from "./collab-lock";
 
 /**
  * Trio harness (standalone-hardening 0008): three tabs as three users in one
@@ -328,7 +329,7 @@ export async function closeTrio(trio: Trio): Promise<void> {
  *  collab coroutine work is in flight: a bare-embind-stack save during a parked
  *  apply mis-dispatches (finding #10b) — the wait is JS-side, so it is safe. */
 export function modelText(page: Page, cfg: ToolCfg): Promise<string> {
-  return page.evaluate(
+  return collabEvaluate(page,
     async ({ saveFn, ext }) => {
       const w = window as unknown as {
         FS: FSApi;
@@ -369,7 +370,7 @@ export interface DriftSummary {
 
 /** Item-level drift summary via the production comparator (browser-entry-v2). */
 export function drift(page: Page, cfg: ToolCfg): Promise<DriftSummary | null> {
-  return page.evaluate(
+  return collabEvaluate(page,
     async ({ saveFn, ext }) => {
       const w = window as unknown as {
         KicadCollabV2: { driftReport(f: string, p: string): DriftSummary | null };
@@ -386,13 +387,15 @@ export function drift(page: Page, cfg: ToolCfg): Promise<DriftSummary | null> {
 
 /** Invoke a Module.* test hook with plain args and return its result. */
 export function callHook<T>(page: Page, fn: string, ...args: (string | number)[]): Promise<T> {
-  return page.evaluate(
-    ({ fn, args }) => {
-      const w = window as unknown as { Module: Record<string, (...a: unknown[]) => unknown> };
-      return w.Module[fn]!(...args);
-    },
-    { fn, args },
-  ) as Promise<T>;
+  const run = ({ fn, args }: { fn: string; args: (string | number)[] }) => {
+    const w = window as unknown as { Module: Record<string, (...a: unknown[]) => unknown> };
+    return w.Module[fn]!(...args);
+  };
+  // Undo/redo are user input; entering their dispatcher under a render lock
+  // correctly rejects them. Host history obtains its own lock for capture.
+  return (fn === "kicadCollabTestUndo" || fn === "kicadCollabTestRedo"
+    ? page.evaluate(run, { fn, args })
+    : collabEvaluate(page, run, { fn, args })) as Promise<T>;
 }
 
 export function getPos(page: Page, uuid: string): Promise<string> {
@@ -400,7 +403,16 @@ export function getPos(page: Page, uuid: string): Promise<string> {
 }
 
 export function undoDepth(page: Page): Promise<number> {
-  return callHook<number>(page, "kicadCollabTestUndoDepth");
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __collabV2: { binding: { historyState?: { undo: number } } };
+      Module: { kicadCollabTestUndoDepth(): number };
+    };
+    const host = w.__collabV2.binding.historyState;
+    const native = w.Module.kicadCollabTestUndoDepth();
+    if (host && native !== 0) throw new Error("Collaborative history leaked into native undo");
+    return host ? host.undo : native;
+  });
 }
 
 // ── Oracles ──────────────────────────────────────────────────────────────────

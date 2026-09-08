@@ -1,21 +1,27 @@
 import type { Page } from "@playwright/test";
+import { execSync } from "node:child_process";
+import path from "node:path";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
+import { startV2, undoDepth } from "./utils/trio";
 
 /**
  * Miss 09 — collab-aware undo (docs/features/ysync-review/09 + 19): remote
- * applies are pushed with SKIP_UNDO, so a peer's edit never lands on the local
- * undo stack; Ctrl+Z is local-ops-only. Stale local undo entries — an item a
- * remote apply replaced (same uuid, new object) or deleted — are re-anchored /
- * dropped by the UUID guard at undo time instead of dereferencing a freed
- * pointer.
+ * edits never enter host history; Ctrl+Z is local-ops-only. Collaborative
+ * native history is disposed before pointer replacement. Yjs history works
+ * at field granularity, so undo cannot restore an unseen peer's before-image.
  *
- * Single-tab, items-bridge driving style: kicadCollabApplyItems plays the
- * remote peer, kicadCollabTest* plays the local user. Assertions are
+ * Single-tab, production host bridge: a peer-origin Yjs update plays the
+ * remote peer, locked kicadCollabTest* probes play the local user. Assertions are
  * model-level (undo depth + positions); hasAbort pins crash-freedom, which is
  * the point of the stranded-entry cases.
  *
  * Skips (not fails) on a wasm build that predates the undo test hooks.
  */
+
+test.beforeAll(() => {
+  execSync("node collab/build.mjs", { cwd: path.resolve(__dirname, ".."), stdio: "inherit" });
+});
 
 const WIRE1 = "22222222-0000-0000-0000-000000000001";
 const WIRE2 = "22222222-0000-0000-0000-000000000002";
@@ -114,18 +120,22 @@ async function bootOpen(page: Page, url: string, content: string, file: string):
   );
 
   // Hook-presence guard: false ⇒ the wasm build predates the undo test hooks.
-  return page.evaluate(() => {
+  const hooked = await page.evaluate(() => {
     const m = (window as unknown as { Module: Record<string, unknown> }).Module;
     return typeof m.kicadCollabTestUndo === "function" && typeof m.kicadCollabTestUndoDepth === "function";
   });
+  await page.addScriptTag({ path: path.resolve(__dirname, "../apps/kicad/collab-bundle-v2.js") });
+  await startV2(page, { room: `undo-${file}-${test.info().workerIndex}`, seedText: content });
+  return hooked;
 }
 
 const getPos = (page: Page, id: string) =>
   page.evaluate((i) => window.Module.kicadCollabGetPos(i), id);
-const undoDepth = (page: Page) => page.evaluate(() => (window.Module as unknown as Mod).kicadCollabTestUndoDepth());
 const runUndo = (page: Page) => page.evaluate(() => (window.Module as unknown as Mod).kicadCollabTestUndo());
 const applyItems = (page: Page, wire: object) =>
-  page.evaluate((j) => window.Module.kicadCollabApplyItems(j), JSON.stringify(wire));
+  page.evaluate((j) => (window as unknown as {
+    KicadCollabV2: { applyPeerItems(json: string): void };
+  }).KicadCollabV2.applyPeerItems(j), JSON.stringify(wire));
 
 test.describe("eeschema collab undo (miss 09: local-ops-only)", () => {
   test.describe.configure({ timeout: 420000 });
@@ -137,7 +147,7 @@ test.describe("eeschema collab undo (miss 09: local-ops-only)", () => {
     const hooked = await bootOpen(page, "/kicad/eeschema.html", SAMPLE_SCH, "undoA.kicad_sch");
     test.skip(!hooked, "wasm build predates the undo test hooks");
 
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
+    await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems());
     expect(await undoDepth(page)).toBe(0);
 
     const orig: Record<string, string> = {
@@ -146,14 +156,14 @@ test.describe("eeschema collab undo (miss 09: local-ops-only)", () => {
     };
 
     // Local op → exactly one undo entry.
-    const movedId = (await page.evaluate(() =>
+    const movedId = (await collabEvaluate(page, () =>
       window.Module.kicadCollabTestMoveFirst(200000, 0),
     )) as string;
     expect([WIRE1, WIRE2]).toContain(movedId);
     await expect
       .poll(() => getPos(page, movedId), { timeout: 15000, intervals: [250] })
       .not.toBe(orig[movedId]);
-    expect(await undoDepth(page)).toBe(1);
+    await expect.poll(() => undoDepth(page)).toBe(1);
 
     // Remote apply (peer deletes the other wire) → depth must NOT grow.
     const target = movedId === WIRE1 ? WIRE2 : WIRE1;
@@ -180,13 +190,13 @@ test.describe("eeschema collab undo (miss 09: local-ops-only)", () => {
 
     // Original WIRE1 blob (pre-edit geometry) — the "peer's" replacement payload.
     const snap = JSON.parse(
-      await page.evaluate(() => window.Module.kicadCollabSnapshotItems()),
+      await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems()),
     ) as { added: Array<{ id?: string; sexpr?: string }> };
     const wire1Blob = snap.added.find((e) => e.id === WIRE1 || (e.sexpr ?? "").includes(WIRE1));
     expect(wire1Blob?.sexpr, "snapshot must carry WIRE1's blob").toBeTruthy();
 
-    // Local op referencing WIRE1 → undo entry holds a pointer to today's object.
-    await page.evaluate(
+    // Local op referencing WIRE1 → host history remembers its changed fields.
+    await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestRotateItem(i: string, d: number): boolean } })
           .Module.kicadCollabTestRotateItem(id, 90),
@@ -220,9 +230,9 @@ test.describe("eeschema collab undo (miss 09: local-ops-only)", () => {
     const hooked = await bootOpen(page, "/kicad/eeschema.html", SAMPLE_SCH, "undoC.kicad_sch");
     test.skip(!hooked, "wasm build predates the undo test hooks");
 
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
+    await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems());
 
-    await page.evaluate(
+    await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestRotateItem(i: string, d: number): boolean } })
           .Module.kicadCollabTestRotateItem(id, 90),
@@ -251,21 +261,21 @@ test.describe("pcbnew collab undo (miss 09: local-ops-only)", () => {
     const hooked = await bootOpen(page, "/kicad/pcbnew-collab.html", SAMPLE_PCB, "undoA.kicad_pcb");
     test.skip(!hooked, "wasm build predates the undo test hooks");
 
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
+    await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems());
     expect(await undoDepth(page)).toBe(0);
 
     const ids = [VIA1, SEG1, SEG2];
     const orig: Record<string, string> = {};
     for (const id of ids) orig[id] = await getPos(page, id);
 
-    const movedId = (await page.evaluate(() =>
+    const movedId = (await collabEvaluate(page, () =>
       window.Module.kicadCollabTestMoveFirst(200000, 0),
     )) as string;
     expect(ids).toContain(movedId);
     await expect
       .poll(() => getPos(page, movedId), { timeout: 15000, intervals: [250] })
       .not.toBe(orig[movedId]);
-    expect(await undoDepth(page)).toBe(1);
+    await expect.poll(() => undoDepth(page)).toBe(1);
 
     const target = movedId === SEG1 ? SEG2 : SEG1;
     await applyItems(page, { added: [], changed: [], removed: [target] });
@@ -288,12 +298,12 @@ test.describe("pcbnew collab undo (miss 09: local-ops-only)", () => {
     const hooked = await bootOpen(page, "/kicad/pcbnew-collab.html", SAMPLE_PCB, "undoB.kicad_pcb");
     test.skip(!hooked, "wasm build predates the undo test hooks");
 
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
+    await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems());
 
     const origins: Record<string, string> = {};
     for (const id of [VIA1, SEG1, SEG2]) origins[id] = await getPos(page, id);
 
-    const movedId = (await page.evaluate(() =>
+    const movedId = (await collabEvaluate(page, () =>
       window.Module.kicadCollabTestMoveFirst(200000, 0),
     )) as string;
     await expect

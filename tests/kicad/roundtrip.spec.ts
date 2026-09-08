@@ -1,6 +1,7 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 import { sexprDiff } from "../../web/standalone/src/wasm/collab/sexpr-diff";
+import { collabEvaluate } from "./utils/collab-lock";
 
 /**
  * Round-trip integration tests (feature 0004; v2 items wire since ysync 0008
@@ -111,7 +112,7 @@ async function bootOpen(page: Page, cfg: ToolCfg, content: string, name: string)
 
 /** Save the current model to MEMFS via the tool's save export and read it back. */
 async function saveRead(page: Page, cfg: ToolCfg, name: string): Promise<string> {
-  return page.evaluate(
+  return collabEvaluate(page,
     ({ saveFn, ext, name }) => {
       const w = window as unknown as { FS: FS; Module: Mod };
       const out = `/home/kicad/documents/${name}.${ext}`;
@@ -140,7 +141,7 @@ async function roundTrip(
   const extract = await context.newPage();
   await bootOpen(extract, cfg, cfg.fixture, "rt");
   const orig = await saveRead(extract, cfg, "orig_dump");
-  const snap = await extract.evaluate(() => window.Module.kicadCollabSnapshotItems());
+  const snap = await collabEvaluate(extract, () => window.Module.kicadCollabSnapshotItems());
   await extract.close();
 
   // v2 wire: { added: [{ sexpr, parent }] } — uuids live inside the blobs.
@@ -151,7 +152,7 @@ async function roundTrip(
   // 4–5: fresh page (fresh wasm), open an empty doc, rebuild the model from the snapshot.
   const rebuild = await context.newPage();
   await bootOpen(rebuild, cfg, cfg.empty, "rt");
-  await rebuild.evaluate((s) => window.Module.kicadCollabApplyItems(s), snap);
+  await collabEvaluate(rebuild, (s) => window.Module.kicadCollabApplyItems(s), snap);
 
   // apply() runs async for eeschema/pcbnew (CallAfter + coroutine). Best-effort wait
   // for the first applied item to materialize — but DON'T fail here: proceed to save
@@ -180,7 +181,7 @@ async function fileAndWire(
   const page = await context.newPage();
   await bootOpen(page, cfg, cfg.fixture, "rt");
   const file = await saveRead(page, cfg, "orig_dump");
-  const snap = await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
+  const snap = await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems());
   await page.close();
 
   // Splice the blobs into one synthetic document so sexprDiff can index them by

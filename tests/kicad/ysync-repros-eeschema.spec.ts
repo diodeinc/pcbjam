@@ -1,5 +1,7 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
+import { captureLocalItems } from "./utils/capture-items";
 
 /**
  * eeschema single-tab ysync coverage (docs in docs/features/ysync-review on
@@ -127,17 +129,9 @@ test.describe("eeschema ysync repros (v2 items wire, single tab)", () => {
     testLogger,
   }) => {
     await bootOpen(page);
-    // snapshotItems: registers the SCHEMATIC_LISTENER (ensureBridge) +
-    // baselines the differ — what seed()'s non-file-seed branches rely on.
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
-    await page.evaluate(() => {
-      (window as unknown as { __items: string[] }).__items = [];
-      (window as unknown as { kicadCollab: object }).kicadCollab = {
-        onItems: (j: string) => (window as unknown as { __items: string[] }).__items.push(j),
-      };
-    });
+    await captureLocalItems(page, SAMPLE_SCH);
 
-    const movedId = (await page.evaluate(() =>
+    const movedId = (await collabEvaluate(page, () =>
       window.Module.kicadCollabTestMoveFirst(200000, 0),
     )) as string;
     expect(movedId).toMatch(/[0-9a-f-]{36}/);
@@ -163,7 +157,7 @@ test.describe("eeschema ysync repros (v2 items wire, single tab)", () => {
   // fail that it EMITTED. Gated on the wasm build carrying the hooks.
 
   function saveRead(page: Page): Promise<string> {
-    return page.evaluate(() => {
+    return collabEvaluate(page, () => {
       const w = window as unknown as { FS: FS; Module: Mod };
       const out = "/home/kicad/documents/probe.kicad_sch";
       w.Module.kicadSaveSchematic(out);
@@ -185,13 +179,7 @@ test.describe("eeschema ysync repros (v2 items wire, single tab)", () => {
       hook,
     );
     if (!has) return false;
-    await page.evaluate(() => window.Module.kicadCollabSnapshotItems());
-    await page.evaluate(() => {
-      (window as unknown as { __items: string[] }).__items = [];
-      (window as unknown as { kicadCollab: object }).kicadCollab = {
-        onItems: (j: string) => (window as unknown as { __items: string[] }).__items.push(j),
-      };
-    });
+    await captureLocalItems(page, SAMPLE_SCH);
     return true;
   }
 
@@ -199,7 +187,7 @@ test.describe("eeschema ysync repros (v2 items wire, single tab)", () => {
     const ok = await armed(page, "kicadCollabTestRotateItem");
     test.skip(!ok, "wasm build predates the ysync repro hooks");
 
-    const queued = await page.evaluate(
+    const queued = await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestRotateItem(i: string, d: number): boolean } })
           .Module.kicadCollabTestRotateItem(id, 90),
@@ -227,7 +215,7 @@ test.describe("eeschema ysync repros (v2 items wire, single tab)", () => {
     const ok = await armed(page, "kicadCollabTestSetFieldText");
     test.skip(!ok, "wasm build predates the ysync repro hooks");
 
-    const queued = await page.evaluate(
+    const queued = await collabEvaluate(page,
       (id) =>
         (window as unknown as { Module: { kicadCollabTestSetFieldText(i: string, t: string): boolean } })
           .Module.kicadCollabTestSetFieldText(id, "22k"),

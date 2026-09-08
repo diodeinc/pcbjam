@@ -16,6 +16,7 @@
 // the v2 path breaks on that (Y types are instanceof-checked singletons; same
 // reason the standalone vitest config sets `dedupe: ["yjs"]`).
 import * as Y from "yjs";
+import { applyBase64Update, itemWiresUpdate, LOCAL_KICAD_EDIT, materializeRootDiff } from "../../web/standalone/src/wasm/collab/model";
 import {
   compareSlots,
   docToFile,
@@ -23,6 +24,7 @@ import {
   driftDocDelta,
   fileToDoc,
   isEmptyKicadDelta,
+  parseItemsWireDelta,
   yToDoc,
 } from "@pcbjam/shared";
 import {
@@ -62,7 +64,7 @@ async function start(
     provider: { kind: "broadcastchannel", settleMs: opts.settleMs ?? 400 },
     room: opts.room,
   });
-  const h = attachKicadCollab(mod, win, session, {
+  const h = await attachKicadCollab(mod, win, session, {
     seedDoc: opts.seedText ? fileToDoc(opts.seedText) : undefined,
     editorMatchesDoc: opts.editorMatchesDoc,
   });
@@ -78,6 +80,29 @@ function handle(): KicadCollabHandle {
 /** docToFile of the live room doc — THROWS if the doc stopped materializing. */
 function renderActiveDoc(): string {
   return docToFile(yToDoc(handle().doc));
+}
+
+/** An independently authored peer edit, never a local-history origin. */
+function applyPeerItems(json: string): void {
+  const doc = handle().doc;
+  applyBase64Update(doc, itemWiresUpdate(doc, parseItemsWireDelta(json)), "test-peer");
+}
+
+/** Observe the production host's outgoing local edits, not the removed native
+ * PCB onItems callback. Preserve the wire-level containment assertions. */
+function captureLocalItems(): void {
+  const doc = handle().doc;
+  const previous = new Y.Doc();
+  Y.applyUpdate(previous, Y.encodeStateAsUpdate(doc));
+  const wires: string[] = [];
+  (window as unknown as { __items: string[] }).__items = wires;
+  doc.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin === LOCAL_KICAD_EDIT) {
+      wires.push(JSON.stringify(materializeRootDiff(previous, doc)));
+    }
+    Y.applyUpdate(previous, update);
+  });
+  doc.on("destroy", () => previous.destroy());
 }
 
 /** What ONE seeder would materialize — the bug-06 reference rendering. */
@@ -157,8 +182,10 @@ declare global {
       renderActiveDoc: typeof renderActiveDoc;
       singleSeedRender: typeof singleSeedRender;
       driftReport: typeof driftReport;
+      applyPeerItems: typeof applyPeerItems;
+      captureLocalItems: typeof captureLocalItems;
     };
   }
 }
 
-window.KicadCollabV2 = { start, renderActiveDoc, singleSeedRender, driftReport };
+window.KicadCollabV2 = { start, renderActiveDoc, singleSeedRender, driftReport, applyPeerItems, captureLocalItems };

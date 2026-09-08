@@ -3,6 +3,7 @@ import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import { test, expect } from './fixtures';
 import { hideCursor } from './utils/screenshot-compare';
+import { collabEvaluate } from './utils/collab-lock';
 
 /**
  * Eeschema "R" rotate regression (reported 2026-09-02, local wasm editor).
@@ -172,7 +173,7 @@ function changedShare(a: Buffer, b: Buffer): number {
 
 /** The symbol's `(at x y ROT)` as the bridge sees it right now. */
 async function symbolRotationFromBridge(page: Page): Promise<number> {
-    const sexprs: string[] = await page.evaluate(() => {
+    const sexprs: string[] = await collabEvaluate(page, () => {
         const w = window as unknown as WxWindow;
         const wire = JSON.parse(w.Module.kicadCollabSnapshotItems()) as {
             added: { sexpr: string }[];
@@ -251,6 +252,9 @@ test.describe('Eeschema rotate (R)', () => {
 
         const after = await page.screenshot({ clip: box });
         const share = changedShare(before, after);
+        // Snapshot checkpoints require an idle schematic selection tool. Capture
+        // repaint evidence first, then clear selection without changing the edit.
+        await page.keyboard.press('Escape');
         const rotBridge = await symbolRotationFromBridge(page);
         console.log(`[rotate-spec] hotkey: bridge rot=${rotBridge} canvasChanged=${(share * 100).toFixed(2)}%`);
 
@@ -275,7 +279,7 @@ test.describe('Eeschema rotate (R)', () => {
         expect(await symbolRotationFromBridge(page), 'pristine symbol orientation').toBe(0);
         const before = await page.screenshot({ clip: box });
 
-        const ok = await page.evaluate(
+        const ok = await collabEvaluate(page,
             (uuid) => (window as unknown as WxWindow).Module.kicadCollabTestRotateItem(uuid, 90),
             SYMBOL_UUID
         );

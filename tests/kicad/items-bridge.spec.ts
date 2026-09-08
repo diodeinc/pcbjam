@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
 
 /**
  * v2 "items" bridge (ysync 0008 Stage C): per-item s-expr payloads on
@@ -96,7 +97,7 @@ async function bootOpen(page: Page, cfg: ToolCfg): Promise<void> {
 }
 
 async function saveRead(page: Page, cfg: ToolCfg, name: string): Promise<string> {
-  return page.evaluate(
+  return collabEvaluate(page,
     ({ saveFn, ext, name }) => {
       const w = window as unknown as { FS: FS; Module: Mod };
       const out = `/home/kicad/documents/${name}.${ext}`;
@@ -251,7 +252,7 @@ for (const cfg of [PL, SCH, PCB]) {
 
       // 1. snapshotItems: every fixture uuid appears in some wire blob.
       const snap = JSON.parse(
-        await page.evaluate(() => window.Module.kicadCollabSnapshotItems()),
+        await collabEvaluate(page, () => window.Module.kicadCollabSnapshotItems()),
       ) as { added: Array<{ sexpr: string; parent: string | null }> };
       const allBlobs = snap.added.map((w) => w.sexpr).join("\n");
       for (const uuid of cfg.uuids) {
@@ -300,7 +301,7 @@ for (const cfg of [PL, SCH, PCB]) {
       } else {
         changedSexpr = cfg.changed.sexpr;
       }
-      await page.evaluate(
+      await collabEvaluate(page,
         ({ changed, added, removed }) => {
           window.Module.kicadCollabApplyItems(
             JSON.stringify({ added: [{ sexpr: added }], changed: [{ sexpr: changed }], removed: [removed] }),

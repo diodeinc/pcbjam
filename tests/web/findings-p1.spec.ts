@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { collabEvaluate } from '../kicad/utils/collab-lock';
 
 /**
  * Findings P-1 on the REAL standalone (collab-bound): kicadCollabFitViewport
@@ -39,12 +40,12 @@ async function fitLands(page: Page, t: { cx: number; cy: number; hw: number; hh:
   }, { timeout, intervals: [250] }).toBe(true).then(() => true, () => false);
 }
 async function rotation(page: Page, id: string): Promise<number | null> {
-  const blob = await page.evaluate((i) => (window as unknown as W).Module.kicadCollabTestItemBlob(i), id);
+  const blob = await collabEvaluate(page, (i) => (window as unknown as W).Module.kicadCollabTestItemBlob(i), id);
   const m = blob.match(/\(footprint[^]*?\(at\s+(-?[\d.]+)\s+(-?[\d.]+)(?:\s+(-?[\d.]+))?\)/);
   return m ? (m[3] ? Number(m[3]) : 0) : null;
 }
 async function firstFootprint(page: Page): Promise<{ id: string; x: number; y: number }> {
-  const items: Array<{ id: string; type: string; x: number; y: number }> = await page.evaluate(
+  const items: Array<{ id: string; type: string; x: number; y: number }> = await collabEvaluate(page,
     () => JSON.parse((window as unknown as W).Module.kicadCollabSnapshot()).added);
   const fp = items.find((i) => i.type === 'FOOTPRINT');
   if (!fp) throw new Error('no footprint on demo board');
@@ -66,7 +67,7 @@ test('P-1 standalone: fit lands after an embind-committed rotate', async ({ page
   expect(await fitLands(page, T1), 'fit before edit').toBe(true);
   const fp = await firstFootprint(page);
   const r0 = await rotation(page, fp.id);
-  await page.evaluate((id) => (window as unknown as W).Module.kicadCollabTestRotateItem(id, 90), fp.id);
+  await collabEvaluate(page, (id) => (window as unknown as W).Module.kicadCollabTestRotateItem(id, 90), fp.id);
   await expect.poll(() => rotation(page, fp.id), { timeout: 15000 }).not.toBe(r0);
   await page.waitForTimeout(1500); // eslint-disable-line -- let flushDiff + ysync run
   const landed = await fitLands(page, T2);

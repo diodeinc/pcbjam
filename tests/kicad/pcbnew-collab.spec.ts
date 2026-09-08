@@ -2,6 +2,8 @@ import { execSync } from "node:child_process";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
+import { startV2 } from "./utils/trio";
 
 /**
  * pcbnew Yjs collaborative bridge (features/yjs-bridge commit 4).
@@ -161,7 +163,7 @@ test.beforeAll(() => {
 test.describe("pcbnew collab bridge — single page", () => {
   test("snapshot reflects board by uuid/type/position", async ({ page, testLogger }) => {
     await bootAndOpen(page, "snap");
-    const snap = await page.evaluate(() => JSON.parse(window.Module.kicadCollabSnapshot()));
+    const snap = await collabEvaluate(page, () => JSON.parse(window.Module.kicadCollabSnapshot()));
     const byId = new Map<string, { type: string; x: number; y: number }>(
       snap.added.map((i: { id: string; type: string; x: number; y: number }) => [i.id, i]),
     );
@@ -215,7 +217,7 @@ test.describe("pcbnew collab bridge — single page", () => {
       await bootAndOpen(page, `add-${label}`);
 
       // Full emit-equivalent payload: snapshot item (native geometry fields) + the clipboard blob.
-      const payload = await page.evaluate((i) => {
+      const payload = await collabEvaluate(page, (i) => {
         const snap = JSON.parse(window.Module.kicadCollabSnapshot());
         const item = snap.added.find((it: { id: string }) => it.id === i);
         return { ...item, sexpr: window.Module.kicadCollabTestItemBlob(i) };
@@ -225,7 +227,7 @@ test.describe("pcbnew collab bridge — single page", () => {
       expect(posBefore, `${label} resolvable before`).not.toBe("");
 
       // delete it
-      await page.evaluate(
+      await collabEvaluate(page,
         (i) => window.Module.kicadCollabApply(JSON.stringify({ added: [], changed: [], removed: [i] })),
         id,
       );
@@ -237,7 +239,7 @@ test.describe("pcbnew collab bridge — single page", () => {
         .toBe("");
 
       // re-add it
-      await page.evaluate(
+      await collabEvaluate(page,
         (p) => window.Module.kicadCollabApply(JSON.stringify({ added: [p], changed: [], removed: [] })),
         payload,
       );
@@ -251,7 +253,7 @@ test.describe("pcbnew collab bridge — single page", () => {
       // Fidelity beyond the anchor: a text's justification anchors its glyphs, so a peer that
       // dropped it would render the text visibly offset even though GetPosition matches. Confirm
       // the reconstructed item round-trips its type-defining fields.
-      const after = await page.evaluate((i) => {
+      const after = await collabEvaluate(page, (i) => {
         const snap = JSON.parse(window.Module.kicadCollabSnapshot());
         return snap.added.find((it: { id: string }) => it.id === i);
       }, id);
@@ -282,7 +284,7 @@ test.describe("pcbnew collab bridge — single page", () => {
     const [bx, by] = before.split(",").map(Number);
 
     const moveTo = async (x: number) => {
-      await page.evaluate(
+      await collabEvaluate(page,
         ({ id, x, by }) =>
           window.Module.kicadCollabApply(
             JSON.stringify({
@@ -327,7 +329,7 @@ test.describe("pcbnew collab bridge — single page", () => {
 
     // changed: reshape SEG1's endpoints (a track moves via its two endpoints, like an eeschema
     // wire — the sx/sy/ex/ey form the emit side always produces). Deferred via CallAfter → poll.
-    await page.evaluate(
+    await collabEvaluate(page,
       ({ id, nx, by }) =>
         window.Module.kicadCollabApply(
           JSON.stringify({
@@ -346,7 +348,7 @@ test.describe("pcbnew collab bridge — single page", () => {
       .toBe(`${nx},${by}`);
 
     // removed: delete SEG2.
-    await page.evaluate(
+    await collabEvaluate(page,
       (seg) =>
         window.Module.kicadCollabApply(JSON.stringify({ changed: [], added: [], removed: [seg] })),
       SEG2,
@@ -359,7 +361,7 @@ test.describe("pcbnew collab bridge — single page", () => {
       .toBe("");
 
     // added: a new track reconstructs by uuid (native PCB_TRACK build — no clipboard Parse).
-    await page.evaluate(
+    await collabEvaluate(page,
       (trackId) =>
         window.Module.kicadCollabApply(
           JSON.stringify({
@@ -384,7 +386,7 @@ test.describe("pcbnew collab bridge — single page", () => {
     await expect
       .poll(
         async () =>
-          (await page.evaluate(() => window.Module.kicadCollabSnapshot())).includes(TRACK_ID),
+          (await collabEvaluate(page, () => window.Module.kicadCollabSnapshot())).includes(TRACK_ID),
         { timeout: 10000, intervals: [250] },
       )
       .toBe(true);
@@ -413,7 +415,7 @@ test.describe("pcbnew collab bridge — single page", () => {
       const [cx, cy] = before.split(",").map(Number);
       const ny = cy + 3_000_000; // +3mm in Y
 
-      await page.evaluate(
+      await collabEvaluate(page,
         ({ id, cx, ny }) =>
           window.Module.kicadCollabApply(
             JSON.stringify({ changed: [{ id, x: cx, y: ny }], added: [], removed: [] }),
@@ -441,7 +443,7 @@ test.describe("pcbnew collab bridge — two tabs (BroadcastChannel)", () => {
   // re-enabled 2026-08-13: passes on the JSPI build (both engines)
   test("a local move propagates A→B", async ({ context, testLogger }) => {
     const channel = `pcb-collab-e2e-${test.info().workerIndex}`;
-    const bundle = path.resolve(__dirname, "../apps/kicad/collab-bundle.js");
+    const bundle = path.resolve(__dirname, "../apps/kicad/collab-bundle-v2.js");
 
     const tabA = await context.newPage();
     const tabB = await context.newPage();
@@ -449,27 +451,19 @@ test.describe("pcbnew collab bridge — two tabs (BroadcastChannel)", () => {
     await bootAndOpen(tabB, "tabB");
     for (const p of [tabA, tabB]) await p.addScriptTag({ path: bundle });
 
-    const startCollab = (p: Page) =>
-      p.evaluate(async (ch) => {
-        const w = window as unknown as {
-          KicadCollab: { start: (m: unknown, win: unknown, o: unknown) => Promise<unknown> };
-          Module: unknown;
-        };
-        await w.KicadCollab.start(w.Module, window, { provider: { kind: "broadcastchannel", settleMs: 500 }, room: ch });
-      }, channel);
-    await startCollab(tabA);
-    await startCollab(tabB);
+    await startV2(tabA, { room: channel, seedText: SAMPLE_PCB });
+    await startV2(tabB, { room: channel, editorMatchesDoc: true });
 
     // Read the pre-move baseline BEFORE triggering the move: TestMoveFirst
     // queues the commit through CallAfter + the apply coroutine, and the drain
     // can land between two consecutive page.evaluate round-trips. A GetPos
     // taken after the call raced that drain (~50% under CI load) and captured
     // the ALREADY-MOVED position, so the not-toBe poll waited on itself.
-    const preSnap = await tabA.evaluate(() => JSON.parse(window.Module.kicadCollabSnapshot()));
+    const preSnap = await collabEvaluate(tabA, () => JSON.parse(window.Module.kicadCollabSnapshot()));
     const prePos = new Map<string, string>(
       preSnap.added.map((i: { id: string; x: number; y: number }) => [i.id, `${i.x},${i.y}`]),
     );
-    const uuid = await tabA.evaluate(() => window.Module.kicadCollabTestMoveFirst(2_000_000, 0));
+    const uuid = await collabEvaluate(tabA, () => window.Module.kicadCollabTestMoveFirst(2_000_000, 0));
     expect(uuid).toMatch(/[0-9a-f-]{36}/);
     const orig = prePos.get(uuid);
     expect(orig, "moved item present in pre-move snapshot").toBeTruthy();

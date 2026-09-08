@@ -2,6 +2,7 @@ import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { clickByTooltip, findByTooltip, waitForEditorReady, shotPath } from '../e2e/utils/element-tracker';
 import { hideCursor } from './utils/screenshot-compare';
+import { collabEvaluate } from './utils/collab-lock';
 
 /**
  * PCBnew "m" move regression — GitHub issue #9.
@@ -41,7 +42,7 @@ async function waitForCollabModule(page: Page): Promise<void> {
 }
 
 async function snapshotItems(page: Page): Promise<SnapItem[]> {
-    return page.evaluate(() => {
+    return collabEvaluate(page, () => {
         const m = (window as unknown as { Module: CollabModule }).Module;
         const snap = JSON.parse(m.kicadCollabSnapshot()) as { added: SnapItem[] };
         return snap.added;
