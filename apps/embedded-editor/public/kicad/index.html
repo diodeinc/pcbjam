@@ -1,0 +1,25 @@
+<!doctype html>
+<!--
+  PCBJam/KiCad WASM integration harness, adapted from tests/apps/kicad/pcbnew.html.
+  PCBJam and the linked KiCad build are GPL-3.0; source/provenance is documented
+  in ../manifest.json and ../licenses.html. This page performs no network access except loading
+  its same-origin static runtime files.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>KiCad</title>
+    <script src="runtime-build.js"></script>
+    <script src="diagnostics.js"></script>
+    <link rel="stylesheet" href="theme.css" />
+    <script src="theme.js"></script>
+  </head>
+  <body>
+    <div id="main-window"></div><div id="window-container"></div><div id="status">Loading KiCad…</div>
+    <script src="bootstrap.js"></script>
+    <script src="wx.js"></script>
+    <script src="wx-dom.js"></script>
+    <script async src="kicad_editor.js"></script>
+  </body>
+</html>

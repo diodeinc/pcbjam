@@ -1,0 +1,109 @@
+/* Override wx's inline desktop chrome, not the PCB canvas or layer swatches. */
+html, body, #main-window {
+  width: 100%; height: 100%; margin: 0; overflow: hidden;
+  background: var(--paper-bg); color: var(--ink);
+  font-family: var(--font-chrome-stack);
+  font-size: var(--data-table-cell-font-size);
+}
+#canvas { display: none; width: 100%; height: 100%; border: 0; }
+/* wx paints dialog panels, trees and grids on these canvases. Hiding every
+   canvas hides that content while leaving only DOM controls over a black box. */
+html .window-canvas { display: block; }
+html .window { background: var(--paper-bg); }
+html .window.toplevel {
+  outline: 1px solid var(--line);
+  box-shadow: 0 10px 30px color-mix(in srgb, var(--ink) 8%, transparent);
+}
+html .window-titlebar {
+  background: var(--paper-surface);
+  color: var(--ink);
+  font-family: var(--font-chrome-stack);
+  font-size: var(--data-table-cell-font-size);
+  font-weight: 600;
+  cursor: default;
+  box-shadow: inset 0 -1px var(--line);
+}
+html .window-titlebar-text { padding-inline: 12px; }
+html .window-titlebar-close { color: var(--muted-ink); }
+html .window-titlebar-close:hover {
+  color: var(--ink);
+  background: var(--hover-surface);
+}
+html .window-resize-handle { display: none; }
+html[data-dialog-open] #window-container::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+  pointer-events: none;
+}
+#status {
+  position: fixed; inset: auto auto 12px 12px; z-index: 2;
+  padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--paper-surface); color: var(--muted-ink);
+}
+#status[data-error] { color: var(--danger-ink); }
+html .wx-dom-control, html .wx-menu-popup, html #wx-tooltip {
+  font-family: var(--font-chrome-stack) !important;
+}
+html [data-wx-menu-bar="1"], html [data-wx-tool-bar="1"],
+html .wx-tab-strip, html .wx-menu-popup {
+  background: var(--paper-surface) !important;
+  color: var(--ink) !important;
+  border-color: var(--line) !important;
+  box-shadow: none !important;
+}
+html .wx-menu-title, html .wx-tool {
+  color: var(--ink) !important;
+  border-radius: var(--radius-control);
+}
+html .wx-menu-title:hover, html .wx-tool:hover:not(:disabled),
+html .wx-tab-strip button:hover {
+  background: var(--hover-surface) !important;
+}
+html .wx-tool[data-wx-toggled="1"], html .wx-tab-strip button[aria-selected="true"] {
+  background: var(--diode-green-surface) !important;
+  color: var(--diode-green) !important;
+  border-color: var(--diode-green) !important;
+}
+html .wx-tab-strip button {
+  background: var(--paper-surface) !important;
+  color: var(--muted-ink) !important;
+  border-color: var(--line) !important;
+  font-family: var(--font-chrome-stack) !important;
+}
+html select.wx-dom-control, html input.wx-dom-control,
+html textarea.wx-dom-control, html [data-wx-check-list="1"] {
+  background: var(--paper-bg) !important;
+  color: var(--ink) !important;
+  border-color: var(--line) !important;
+  border-radius: var(--radius-control);
+}
+html button.wx-dom-control {
+  background: var(--paper-surface) !important;
+  color: var(--ink) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: var(--radius-control);
+}
+html button.wx-dom-control:hover:not(:disabled) {
+  background: var(--hover-surface) !important;
+}
+html input { accent-color: var(--diode-green); }
+html .wx-dom-control:focus-visible, html .wx-dom-control :focus-visible {
+  outline: 1px solid var(--diode-green); outline-offset: -1px;
+}
+html .wx-dom-control:disabled, html .wx-dom-control [disabled] {
+  color: var(--muted-ink) !important;
+}
+html #wx-tooltip {
+  background: var(--paper-surface) !important;
+  color: var(--ink) !important;
+  border: 1px solid var(--line-strong) !important;
+  border-radius: var(--radius-control);
+}
+html [data-wx-scrollbar="1"] { background: var(--paper-surface) !important; }
+html [data-wx-scrollbar="1"] .wx-sb-thumb {
+  background: var(--line-strong) !important;
+  border-color: var(--line) !important;
+}

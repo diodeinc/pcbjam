@@ -1,0 +1,31 @@
+{
+  "name": "@pcbjam/embedded-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "packageManager": "pnpm@12.3.4",
+  "scripts": {
+    "build": "tsc --noEmit && vite build && node scripts/distribute.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@pcbjam/shared": "github:PCBJam/pcbjam-shared#2f2d374e569f2e6698b1e0bf6b62aeb4acf2c035",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "yjs": "^13.6.27"
+  },
+  "devDependencies": {
+    "happy-dom": "^20.0.0",
+    "react-test-renderer": "^18.3.1",
+    "@types/react-test-renderer": "^18.3.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vitest": "^3.0.0"
+  }
+}
