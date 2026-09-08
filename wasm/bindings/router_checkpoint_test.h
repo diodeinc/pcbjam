@@ -74,6 +74,8 @@ static std::string pcbCollabTestRouter( std::string aCommand )
                         PNS::MEANDER_SETTINGS settings = tuner->MeanderSettings();
                         settings.m_spacing = 600000;
                         settings.m_maxAmplitude = 3000000;
+                        settings.SetTargetLength( 25000000 );
+                        settings.SetTargetSkew( 10000000 );
                         tuner->UpdateSettings( settings );
                         routerTestOk = true;
                     }

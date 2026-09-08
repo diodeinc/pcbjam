@@ -37,9 +37,13 @@ async function state(page: Page): Promise<State> {
   return page.evaluate(() => JSON.parse((window.Module as any).kicadCollabTestRouter("")));
 }
 
-async function command(page: Page, op: object): Promise<State> {
+async function command(page: Page, op: { op: string; [key: string]: unknown }): Promise<State> {
   const previous = (await state(page)).sequence;
+  // A direct BOARD mutation has no outer input dispatch. Use the production lock
+  // so the apply coroutine drains posted tool events before releasing it.
+  if (op.op === "commit") await lock(page);
   await page.evaluate((op) => (window.Module as any).kicadCollabTestRouter(JSON.stringify(op)), op);
+  if (op.op === "commit") await page.evaluate(() => (window.Module as any).kicadCollabUnlock());
   await expect.poll(async () => (await state(page)).sequence).toBe(previous + 1);
   return state(page);
 }
@@ -144,7 +148,8 @@ test.describe("cooperative router checkpoints", () => {
       }
       await command(page, { op: "commit" });
       const after = await snapshot(page);
-      const tracks = after.added.filter((blob) => blob.sexpr.trimStart().startsWith("(segment"));
+      // Native non-footprint blobs carry a kicad_pcb parser envelope.
+      const tracks = after.added.filter((blob) => /\(segment\s/.test(blob.sexpr));
       expect(tracks.length).toBeGreaterThan(3);
       const shapes = tracks.map((blob) => blob.sexpr.replace(/\(uuid\s+"[^"]+"\)/g, ""));
       expect(new Set(shapes).size).toBe(shapes.length);
