@@ -151,7 +151,7 @@ describe("connectKicadDoc — deadline + cancellation cover the whole path (C-3)
 });
 
 describe("attachKicadCollab — a seed throw cannot leak the binding (C-2)", () => {
-  it("destroys the partially-attached binding and rethrows", () => {
+  it("destroys the partially-attached binding and rethrows", async () => {
     const binding = {
       seed: vi.fn(() => {
         throw new Error("bridge trap during seed");
@@ -162,20 +162,20 @@ describe("attachKicadCollab — a seed throw cannot leak the binding (C-2)", () 
     bindKicadCollab.mockReturnValue(binding);
     const session = { doc: new Y.Doc(), provider: makeProvider() };
 
-    expect(() =>
+    await expect(
       attachKicadCollab({} as never, {} as never, session as never),
-    ).toThrow("bridge trap during seed");
+    ).rejects.toThrow("bridge trap during seed");
     // The binding (global DOWN hook + doc observers) is torn down; the
     // SESSION is untouched — its owner decides what happens next.
     expect(binding.destroy).toHaveBeenCalledTimes(1);
     expect(session.provider.destroy).not.toHaveBeenCalled();
   });
 
-  it("returns a working handle when seed succeeds", () => {
+  it("returns a working handle when seed succeeds", async () => {
     const binding = { seed: vi.fn(), destroy: vi.fn(), items: new Map() };
     bindKicadCollab.mockReturnValue(binding);
     const session = { doc: new Y.Doc(), provider: makeProvider() };
-    const handle = attachKicadCollab({} as never, {} as never, session as never);
+    const handle = await attachKicadCollab({} as never, {} as never, session as never);
     handle.destroy();
     expect(binding.destroy).toHaveBeenCalledTimes(1);
     expect(session.provider.destroy).toHaveBeenCalledTimes(1);

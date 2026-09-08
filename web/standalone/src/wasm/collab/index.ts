@@ -226,12 +226,12 @@ export async function connectKicadDoc(opts: {
  * file was materialized from this very doc, so seed only baselines the differ
  * instead of re-applying the full document.
  */
-export function attachKicadCollab(
+export async function attachKicadCollab(
   mod: KicadItemsModule,
   win: KicadItemsWindow,
   session: KicadDocSession,
   opts?: { seedDoc?: KicadDoc; editorMatchesDoc?: boolean; readOnly?: boolean },
-): KicadCollabHandle {
+): Promise<KicadCollabHandle> {
   if (opts?.readOnly) {
     // Invisible observer: drop the provider's initial empty awareness state so
     // the viewer never appears in anyone's roster (the sync server drops these
@@ -242,7 +242,7 @@ export function attachKicadCollab(
     readOnly: opts?.readOnly,
   });
   try {
-    binding.seed(opts?.seedDoc, { editorMatchesDoc: opts?.editorMatchesDoc });
+    await binding.seed(opts?.seedDoc, { editorMatchesDoc: opts?.editorMatchesDoc });
   } catch (err) {
     // A partially-attached binding must not survive a seed throw (findings
     // C-2): it already owns the global DOWN hook + doc observers, and the
