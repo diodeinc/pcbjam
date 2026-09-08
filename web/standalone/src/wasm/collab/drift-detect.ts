@@ -40,6 +40,8 @@ interface DriftModule {
   kicadSaveBoard?(path: string): void;
   kicadSaveSchematic?(path: string): void;
   kicadSaveDrawingSheet?(path: string): void;
+  kicadCollabTryLock?(): boolean;
+  kicadCollabUnlock?(): void;
 }
 
 export interface DriftDetectOptions {
@@ -130,6 +132,21 @@ export function startDriftDetection(opts: DriftDetectOptions): DriftDetector {
     // (table index OOB). The next Y-update trigger retries.
     const busy = (opts.mod as { kicadCollabBusy?: () => boolean }).kicadCollabBusy;
     if (busy?.()) return null;
+    // Busy covers queued applies, not local input or a JSPI-suspended tool.
+    // Diagnostics must acquire their OWN checkpoint; defer if the renderer
+    // owns it. pl_editor is the only legacy editor without this native API.
+    if (opts.tool !== "pl_editor") {
+      if (!opts.mod.kicadCollabTryLock || !opts.mod.kicadCollabUnlock) return null;
+      if (!opts.mod.kicadCollabTryLock()) return null;
+    }
+    try {
+      return computeLockedDrift();
+    } finally {
+      if (opts.tool !== "pl_editor") opts.mod.kicadCollabUnlock!();
+    }
+  }
+
+  function computeLockedDrift(): DriftReportBody | null {
     save(scratchPath);
     let text: unknown;
     try {
