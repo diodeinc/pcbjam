@@ -514,6 +514,12 @@ async function boardFootprintRefs(page: import('@playwright/test').Page): Promis
 /** Press Update PCB and wait until the board carries exactly the expected references. */
 async function updateAndExpectRefs(page: import('@playwright/test').Page, refs: string[]): Promise<void> {
     await clickWxButton(page, 'Update PCB');
+    // OnUpdateClick disables OK only after PerformUpdate(false) returns.
+    // Keep the hidden-frame assertion inside the dialog, then close it before
+    // taking a mandatory checkpoint: a modal is not a safe snapshot boundary.
+    await expect(page.getByRole('button', { name: 'Update PCB', exact: true })).toBeDisabled({ timeout: 60000 });
+    await assertSchFrameHidden(page);
+    await closeDialogByButton(page);
     await expect
         .poll(() => boardFootprintRefs(page), {
             message: `board footprints after Update PCB should be ${JSON.stringify(refs)}`,
@@ -545,16 +551,12 @@ test.describe('project-sync: Update PCB applies to the board (R-9)', () => {
         // First sync: the effect, not the report.
         await openSyncDialog(page);
         await updateAndExpectRefs(page, ['R777']);
-        await assertSchFrameHidden(page);
-        await closeDialogByButton(page);
 
         // The schematic changes underneath (live sibling restage) — re-sync must
         // apply the NEW reference, not a cached parse.
         await rewriteSchematic(page, resistorSchWithFixtureLib('R888'));
         await openSyncDialog(page);
         await updateAndExpectRefs(page, ['R888']);
-        await assertSchFrameHidden(page);
-        await closeDialogByButton(page);
 
         expect(consoleLines.some((s) => s.includes('Aborted(')),
             'no wasm abort during the apply flow').toBe(false);
