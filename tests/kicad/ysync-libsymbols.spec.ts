@@ -1,6 +1,7 @@
 import * as path from "path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { collabEvaluate } from "./utils/collab-lock";
 
 /**
  * Miss 08A e2e — embedded library definitions travel the v2 wire.
@@ -142,7 +143,7 @@ function startV2(
 }
 
 function saveText(page: Page): Promise<string> {
-  return page.evaluate(() => {
+  return collabEvaluate(page, () => {
     const w = window as unknown as { FS: FS; Module: Mod };
     const out = "/home/kicad/documents/_dump.kicad_sch";
     w.Module.kicadSaveSchematic(out);

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { collabEvaluate } from './utils/collab-lock';
 import {
     clickMenuBarItem,
     clickMenuItemByText,
@@ -501,7 +502,7 @@ async function closeDialogByButton(page: import('@playwright/test').Page): Promi
 
 /** References of every footprint currently on the board (from the item blobs). */
 async function boardFootprintRefs(page: import('@playwright/test').Page): Promise<string[]> {
-    return page.evaluate(() => {
+    return collabEvaluate(page, () => {
         const m = (window as unknown as { Module: SnapMod }).Module;
         const snap = JSON.parse(m.kicadCollabSnapshot()) as { added: Array<{ id: string; type: string }> };
         return snap.added

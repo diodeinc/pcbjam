@@ -17,6 +17,7 @@
 // reason the standalone vitest config sets `dedupe: ["yjs"]`).
 import * as Y from "yjs";
 import { applyBase64Update, itemWiresUpdate, LOCAL_KICAD_EDIT, materializeRootDiff } from "../../web/standalone/src/wasm/collab/model";
+import { withCollabLock } from "../../web/standalone/src/wasm/collab/lock";
 import {
   compareSlots,
   docToFile,
@@ -105,6 +106,25 @@ function captureLocalItems(): void {
   doc.on("destroy", () => previous.destroy());
 }
 
+/** Queue during a parked load; run only once a safe checkpoint is available.
+ * Keep ownership until the actual coroutine completes, not its embind return. */
+function atCheckpoint<T>(run: () => T | Promise<T>): Promise<T> {
+  const mod = (window as unknown as { Module: {
+    kicadCollabTryLock(): boolean;
+    kicadCollabUnlock(): void;
+    kicadCollabBusy(): boolean;
+  } }).Module;
+  return withCollabLock(mod, async () => {
+    const result = await run();
+    const deadline = Date.now() + 30_000;
+    while (mod.kicadCollabBusy()) {
+      if (Date.now() >= deadline) throw new Error("Native checkpoint work did not settle");
+      await new Promise(resolve => setTimeout(resolve, 16));
+    }
+    return result;
+  });
+}
+
 /** What ONE seeder would materialize — the bug-06 reference rendering. */
 function singleSeedRender(seedText: string): string {
   const ydoc = new Y.Doc();
@@ -184,8 +204,9 @@ declare global {
       driftReport: typeof driftReport;
       applyPeerItems: typeof applyPeerItems;
       captureLocalItems: typeof captureLocalItems;
+      atCheckpoint: typeof atCheckpoint;
     };
   }
 }
 
-window.KicadCollabV2 = { start, renderActiveDoc, singleSeedRender, driftReport, applyPeerItems, captureLocalItems };
+window.KicadCollabV2 = { start, renderActiveDoc, singleSeedRender, driftReport, applyPeerItems, captureLocalItems, atCheckpoint };
