@@ -247,7 +247,8 @@ test.describe('Eeschema rotate (R)', () => {
             timeout: 15000,
             message: 'host undo must not wait for Escape/deselection',
         }).toBe(0);
-        await page.keyboard.press('Control+Shift+z');
+        // KiCad's non-Mac (including WASM) default Redo shortcut.
+        await page.keyboard.press('Control+y');
         await expect.poll(() => symbolRotationFromSave(page), {
             timeout: 15000,
             message: 'host redo restores the rotation without losing selection',
@@ -256,6 +257,58 @@ test.describe('Eeschema rotate (R)', () => {
             Module: { kicadCollabTestUndoDepth(): number };
         }).Module.kicadCollabTestUndoDepth());
         expect(depth, 'collaborative edits never retain native picker history').toBe(0);
+    });
+
+    test('selected symbol survives peer replacement and local undo without resurrecting a peer deletion', async ({ page, testLogger }, testInfo) => {
+        await bootWithSchematic(page);
+        await captureLocalItems(page, SAMPLE_SCH);
+        await page.keyboard.press('Control+a');
+        await page.keyboard.press('r');
+        expect(await symbolRotationFromSave(page)).toBe(90);
+        const wire = await collabEvaluate(page, () => JSON.parse(
+            (window as unknown as WxWindow).Module.kicadCollabSnapshotItems()
+        )) as { added: { sexpr: string; parent: null }[] };
+        const symbol = wire.added.find(item => item.sexpr.includes(SYMBOL_UUID));
+        expect(symbol, 'selected symbol is available at a safe idle checkpoint').toBeTruthy();
+        expect(symbol!.sexpr).toContain('"10k"');
+        await page.evaluate((sexpr) => (window as unknown as {
+            KicadCollabV2: { applyPeerItems(wire: string): void };
+        }).KicadCollabV2.applyPeerItems(JSON.stringify({
+            added: [], changed: [{ sexpr }], removed: [],
+        })), symbol!.sexpr.replace('"10k"', '"22k"'));
+        const savedText = () => page.evaluate((path) => new TextDecoder().decode(
+            (window as unknown as WxWindow).FS.readFile(path)
+        ), SCH_PATH);
+        await expect.poll(async () => {
+            await symbolRotationFromSave(page);
+            return savedText();
+        }).toContain('"22k"');
+        await page.keyboard.press('Control+z');
+        await expect.poll(() => symbolRotationFromSave(page)).toBe(0);
+        expect(await savedText(), 'local undo preserves the peer Value field').toContain('"22k"');
+        const selected = await collabEvaluate(page, () => JSON.parse((window as unknown as {
+            Module: { kicadCollabGetSelection(): string };
+        }).Module.kicadCollabGetSelection()));
+        expect(selected, 'replacement and undo preserve the selected UUID').toContain(SYMBOL_UUID);
+        await page.screenshot({ path: testInfo.outputPath('selected-peer-undo.png') });
+
+        await page.evaluate((id) => (window as unknown as {
+            KicadCollabV2: { applyPeerItems(wire: string): void };
+        }).KicadCollabV2.applyPeerItems(JSON.stringify({ added: [], changed: [], removed: [id] })), SYMBOL_UUID);
+        const symbolExists = () => collabEvaluate(page, (id) => {
+            const snapshot = JSON.parse((window as unknown as WxWindow).Module.kicadCollabSnapshotItems());
+            return snapshot.added.some((item: { sexpr: string }) => item.sexpr.includes(id));
+        }, SYMBOL_UUID);
+        await expect.poll(symbolExists).toBe(false);
+        const redoDepth = () => page.evaluate(() => (window as unknown as {
+            __collabV2: { binding: { historyState: { redo: number } } };
+        }).__collabV2.binding.historyState.redo);
+        expect(await redoDepth(), 'the local rotation is still on the host redo stack').toBe(1);
+        await page.keyboard.press('Control+y');
+        await expect.poll(redoDepth, { message: 'redo request was actually processed' }).toBe(0);
+        await page.keyboard.press('Control+s');
+        expect(await symbolExists(), 'redo must not resurrect the peer-deleted symbol').toBe(false);
+        expect([...testLogger.consoleLogs, ...testLogger.errors].filter(line => /Aborted\(|unreachable|memory access out of bounds/.test(line))).toEqual([]);
     });
 
     test('one R press on a selected symbol rotates it once and repaints the canvas', async ({
