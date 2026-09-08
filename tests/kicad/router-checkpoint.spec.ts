@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { stableShot } from "../e2e/utils/element-tracker";
 
 declare const window: Window & {
   Module: {
@@ -122,7 +123,7 @@ test.describe("cooperative router checkpoints", () => {
         if (tuning) expect((await state(page)).spacing).toBe(600000);
         expect((await snapshot(page)).added.find((blob) => blob.sexpr.includes(REMOTE))?.sexpr).toContain(`(width ${0.3 + i / 10})`);
       }
-      await page.screenshot({ path: test.info().outputPath(`mode-${mode}-after-checkpoint.png`) });
+      await stableShot(page, test.info().outputPath(`mode-${mode}-after-checkpoint.png`));
       // Deleting an unrelated root must not run the generic cancel-all fallback.
       await apply(page, { added: [], changed: [], removed: [REMOTE] });
       expect((await state(page)).active).toBe(true);
