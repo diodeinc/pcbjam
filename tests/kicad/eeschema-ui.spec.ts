@@ -123,7 +123,15 @@ test.describe("eeschema core UI (wasm)", () => {
     await page.keyboard.press("Escape");
     await expect.poll(dialogsOpen, { timeout: 8000, intervals: [300] }).toBe(0);
 
-    // Still alive afterwards.
+    // Canceling createNewText's dialog returns nullptr to the drawing loop;
+    // it does not pop the Draw Text tool. Exit that loop before requesting a
+    // mandatory idle snapshot (and prove the tool still handles input).
+    await page.keyboard.press("Escape");
+    await expect.poll(async () => {
+      const t = await findByTooltip(page, "Draw Text", { elementType: "tool" });
+      return (t?.label ?? "").includes("[checked]");
+    }).toBe(false);
+    // Still alive afterwards, with the original model-count assertion intact.
     expect(await count(page)).toBeGreaterThan(0);
     expect(hasAbort(testLogger), "no WASM abort").toBe(false);
   });
