@@ -118,6 +118,7 @@ test.describe("cooperative router checkpoints", () => {
         if (tuning) expect((await state(page)).spacing).toBe(600000);
         expect((await snapshot(page)).added.find((blob) => blob.sexpr.includes(REMOTE))?.sexpr).toContain(`(width ${0.3 + i / 10})`);
       }
+      await page.screenshot({ path: test.info().outputPath(`mode-${mode}-after-checkpoint.png`) });
       // Deleting an unrelated root must not run the generic cancel-all fallback.
       await apply(page, { added: [], changed: [], removed: [REMOTE] });
       expect((await state(page)).active).toBe(true);
