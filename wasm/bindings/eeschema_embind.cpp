@@ -2577,6 +2577,7 @@ EMSCRIPTEN_BINDINGS(eeschema) {
     function("kicadCollabTestUndo", &schCollabTestUndo);
     function("kicadCollabTestUndoDepth", &schCollabTestUndoDepth);
     function("kicadCollabSetHistoryMode", &schCollabSetHistoryMode);
+    function("kicadCollabQueueHistoryKey", &pcbjam_collab::queueHistoryKey);
     function("kicadCollabTestRedo", &schCollabTestRedo);
     function("kicadCollabTestRedoDepth", &schCollabTestRedoDepth);
     // Presence (collab-presence 0003) — shared names with pcbnew's 0002 set.

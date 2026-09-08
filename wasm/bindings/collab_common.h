@@ -12,7 +12,9 @@
 #ifdef __EMSCRIPTEN__
 
 #include <deque>
+#include <cstring>
 #include <emscripten.h>
+#include <emscripten/html5.h>
 #include <functional>
 #include <string>
 #include <nlohmann/json.hpp>
@@ -24,11 +26,38 @@
 #include <tool/actions.h>
 #include <tool/coroutine.h>
 #include <tool/tool_manager.h>
+#include <tool/tool_dispatcher.h>
 #include <wx/wasm/private/dispatch.h>
+#include <wx/wasm/private/keyboard.h>
+#include <wx/app.h>
 
 namespace pcbjam_collab {
 
 inline std::string toUtf8( const wxString& s ) { return std::string( s.utf8_str() ); }
+
+/** Capture-phase history input uses the same wx/tool translation as regular keys. */
+inline bool queueHistoryKey( std::string aCode, bool aCtrl, bool aShift, bool aAlt, bool aMeta )
+{
+    if( !PCBJAM_REMOTE_LOCK::IsRenderLocked() || !PCBJAM_COLLAB_HISTORY::IsEnabled() )
+        return false;
+
+    auto* frame = wxTheApp ? dynamic_cast<EDA_BASE_FRAME*>( wxTheApp->GetTopWindow() ) : nullptr;
+    if( !frame || !frame->GetToolDispatcher() ) return false;
+
+    EmscriptenKeyboardEvent dom{};
+    if( aCode.size() >= sizeof( dom.code ) ) return false;
+    std::memcpy( dom.code, aCode.c_str(), aCode.size() + 1 );
+    dom.ctrlKey = aCtrl;
+    dom.shiftKey = aShift;
+    dom.altKey = aAlt;
+    dom.metaKey = aMeta;
+    wxKeyEvent key;
+    EmscriptenKeyboardEventToWXEvent( EMSCRIPTEN_EVENT_KEYDOWN, dom, &key );
+    key.SetEventType( wxEVT_CHAR_HOOK );
+    bool special = false;
+    auto event = frame->GetToolDispatcher()->GetToolEvent( &key, &special );
+    return event && frame->GetToolManager()->QueueCollabHistory( *event );
+}
 
 /** Dispose every native history entry through the positive-count path. */
 inline void clearNativeHistory( EDA_BASE_FRAME* aFrame )

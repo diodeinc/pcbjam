@@ -908,6 +908,7 @@ EMSCRIPTEN_BINDINGS(kicad_editor) {
     function("kicadCollabTestUndo", &collabTestUndo);
     function("kicadCollabTestUndoDepth", &collabTestUndoDepth);
     function("kicadCollabSetHistoryMode", &collabSetHistoryMode);
+    function("kicadCollabQueueHistoryKey", &pcbjam_collab::queueHistoryKey);
     function("kicadCollabSetHistoryState", &collabSetHistoryState);
     function("kicadCollabTestRedo", &collabTestRedo);
     function("kicadCollabTestRedoDepth", &collabTestRedoDepth);

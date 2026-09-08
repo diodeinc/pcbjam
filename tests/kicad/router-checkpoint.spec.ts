@@ -93,7 +93,9 @@ test.describe("cooperative router checkpoints", () => {
       window.Module.kicadOpenFile("/home/kicad/documents/router-checkpoint.kicad_pcb");
     }, BOARD);
     await expect.poll(() => page.title(), { timeout: 30000 }).toContain("router-checkpoint");
-    await expect.poll(() => page.evaluate(() => (window.Module as any).kicadCollabSetHistoryMode(true))).toBe(true);
+    await lock(page);
+    expect(await page.evaluate(() => (window.Module as any).kicadCollabSetHistoryMode(true))).toBe(true);
+    await page.evaluate(() => (window.Module as any).kicadCollabUnlock());
   });
 
   for (const mode of [2, 3, 4, 5, 6]) {

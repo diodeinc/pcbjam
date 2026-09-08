@@ -3282,6 +3282,7 @@ EMSCRIPTEN_BINDINGS(pcbnew) {
     function("kicadCollabTestUndo", &pcbCollabTestUndo);
     function("kicadCollabTestUndoDepth", &pcbCollabTestUndoDepth);
     function("kicadCollabSetHistoryMode", &pcbCollabSetHistoryMode);
+    function("kicadCollabQueueHistoryKey", &pcbjam_collab::queueHistoryKey);
     function("kicadCollabTestRedo", &pcbCollabTestRedo);
     function("kicadCollabTestRedoDepth", &pcbCollabTestRedoDepth);
     function("kicadCollabTestRotateItem", &pcbCollabTestRotateItem);
