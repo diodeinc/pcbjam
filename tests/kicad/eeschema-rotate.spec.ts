@@ -234,7 +234,8 @@ async function orientationShownInPanel(page: Page): Promise<string[]> {
 }
 
 test.describe('Eeschema rotate (R)', () => {
-    test('host undo and redo work while the rotated symbol stays selected', async ({ page }) => {
+    for (const overlap of [false, true]) {
+    test(`host undo and redo work while the rotated symbol stays selected${overlap ? ' during a production checkpoint' : ''}`, async ({ page }) => {
         await bootWithSchematic(page);
         await captureLocalItems(page, SAMPLE_SCH);
         await page.keyboard.press('Control+a');
@@ -243,21 +244,68 @@ test.describe('Eeschema rotate (R)', () => {
         // invoking a forbidden native snapshot outside the checkpoint lock.
         expect(await symbolRotationFromSave(page), 'R committed one rotation').toBe(90);
         await page.keyboard.press('Control+z');
-        await expect.poll(() => symbolRotationFromSave(page), {
+        await expect.poll(() => symbolRotationFromBridge(page), {
             timeout: 15000,
             message: 'host undo must not wait for Escape/deselection',
         }).toBe(0);
+        expect(await symbolRotationFromSave(page), 'settled undo is saved through Ctrl+S').toBe(0);
+        const selected = () => collabEvaluate(page, () => JSON.parse((window as unknown as {
+            Module: { kicadCollabGetSelection(): string };
+        }).Module.kicadCollabGetSelection()));
+        expect(await selected()).toEqual([SYMBOL_UUID]);
+        if (overlap) {
+            await page.evaluate(() => {
+                const w = window as unknown as {
+                    Module: { kicadCollabSnapshotItems(): string | Promise<string> };
+                    kicadCollab: { onHistory(direction: string): void; onChanged(): void };
+                    __snapshotHeld?: boolean;
+                    __releaseSnapshot?: () => void;
+                    __historyCalls: string[];
+                };
+                const original = w.Module.kicadCollabSnapshotItems;
+                const onHistory = w.kicadCollab.onHistory;
+                w.__historyCalls = [];
+                w.kicadCollab.onHistory = (direction) => {
+                    w.__historyCalls.push(direction);
+                    onHistory(direction);
+                };
+                // Extend one awaited boundary of the actual production render.
+                // The adapter, NOT collabEvaluate, owns the mandatory lock.
+                w.Module.kicadCollabSnapshotItems = () => {
+                    w.Module.kicadCollabSnapshotItems = original;
+                    const snapshot = original();
+                    w.__snapshotHeld = true;
+                    return new Promise<string>(resolve => {
+                        w.__releaseSnapshot = () => resolve(snapshot);
+                    });
+                };
+                w.kicadCollab.onChanged();
+            });
+            await page.waitForFunction(() => (window as unknown as { __snapshotHeld: boolean }).__snapshotHeld);
+        }
         // KiCad's non-Mac (including WASM) default Redo shortcut.
         await page.keyboard.press('Control+y');
-        await expect.poll(() => symbolRotationFromSave(page), {
+        if (overlap) {
+            // Let wx dispatch the real key with the checkpoint still held.
+            await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+            expect(await page.evaluate(() => (window as unknown as { __historyCalls: string[] }).__historyCalls)).toEqual([]);
+            await page.evaluate(() => (window as unknown as { __releaseSnapshot(): void }).__releaseSnapshot());
+        }
+        await expect.poll(() => symbolRotationFromBridge(page), {
             timeout: 15000,
             message: 'host redo restores the rotation without losing selection',
         }).toBe(90);
+        expect(await symbolRotationFromSave(page), 'settled redo is saved through Ctrl+S').toBe(90);
+        expect(await selected()).toEqual([SYMBOL_UUID]);
+        if (overlap) {
+            expect(await page.evaluate(() => (window as unknown as { __historyCalls: string[] }).__historyCalls)).toEqual(['redo']);
+        }
         const depth = await page.evaluate(() => (window as unknown as {
             Module: { kicadCollabTestUndoDepth(): number };
         }).Module.kicadCollabTestUndoDepth());
         expect(depth, 'collaborative edits never retain native picker history').toBe(0);
     });
+    }
 
     test('selected symbol survives peer replacement and local undo without resurrecting a peer deletion', async ({ page, testLogger }, testInfo) => {
         await bootWithSchematic(page);
@@ -279,12 +327,16 @@ test.describe('Eeschema rotate (R)', () => {
         const savedText = () => page.evaluate((path) => new TextDecoder().decode(
             (window as unknown as WxWindow).FS.readFile(path)
         ), SCH_PATH);
-        await expect.poll(async () => {
-            await symbolRotationFromSave(page);
-            return savedText();
-        }).toContain('"22k"');
+        // Observe completion without issuing Save concurrently with native
+        // apply/history. Non-history input is intentionally excluded under the
+        // render lock. Keep the independent real-save assertions once settled.
+        await expect.poll(() => collabEvaluate(page, () => {
+            const snapshot = JSON.parse((window as unknown as WxWindow).Module.kicadCollabSnapshotItems());
+            return snapshot.added.map((item: { sexpr: string }) => item.sexpr).join('\n');
+        })).toContain('"22k"');
         await page.keyboard.press('Control+z');
-        await expect.poll(() => symbolRotationFromSave(page)).toBe(0);
+        await expect.poll(() => symbolRotationFromBridge(page)).toBe(0);
+        expect(await symbolRotationFromSave(page)).toBe(0);
         expect(await savedText(), 'local undo preserves the peer Value field').toContain('"22k"');
         const selected = await collabEvaluate(page, () => JSON.parse((window as unknown as {
             Module: { kicadCollabGetSelection(): string };
