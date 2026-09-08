@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { useEffect, useRef, useState } from "react";
-import {
-  Button,
-  Spinner,
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "./ui";
+import { Button, Spinner } from "./ui";
 import {
   Y,
   LOCAL_KICAD_EDIT,
@@ -434,27 +427,10 @@ export function SandboxKicadPane({
           {boardPath.split("/").at(-1)}
         </span>
         {!error && board && connectedSessions !== null ? (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span
-                  tabIndex={0}
-                  role="status"
-                  aria-label="Online"
-                  className="flex items-center gap-1.5"
-                >
-                  <span className="h-2 w-2 rounded-full bg-diode-green" />
-                  {connectedSessions > 1 ? (
-                    <span>{connectedSessions} tabs</span>
-                  ) : null}
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>
-                Online · {connectedSessions} browser{" "}
-                {connectedSessions === 1 ? "tab" : "tabs"} connected
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <span className="connection-status" role="status" title="Connected browser tabs, including this tab">
+            <span className="connection-dot" aria-hidden="true" />
+            {connectedSessions} live {connectedSessions === 1 ? "tab" : "tabs"}
+          </span>
         ) : !error ? (
           <span className="flex items-center gap-1.5" role="status">
             <Spinner className="h-3 w-3" />

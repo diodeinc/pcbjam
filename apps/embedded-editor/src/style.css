@@ -31,6 +31,8 @@ header { position:relative; }
 .embedded > .editor-about { position:absolute; top:0; right:0; }
 /* Share the existing filename/status strip; do not add another embedded row. */
 .embedded > [data-kicad-state] > :first-child { padding-right:76px; background:var(--paper-surface); }
+.connection-status { display:flex; align-items:center; gap:6px; flex-shrink:0; }
+.connection-dot { width:6px; height:6px; border-radius:50%; background:var(--diode-green); }
 .command-list { display:flex; flex-direction:column; gap:3px; } .command-list button { text-align:left; } small { color:var(--muted-ink); }
 [role=alert] { color:var(--danger-ink); padding:8px 12px; }
-.flex { display:flex; } .flex-col { flex-direction:column; } .flex-1 { flex:1; } .h-full { height:100%; } .min-h-0 { min-height:0; } .shrink-0 { flex-shrink:0; } .items-center { align-items:center; } .gap-2 { gap:8px; } .px-2 { padding-inline:8px; } .h-7 { min-height:28px; } .border-b { border-bottom:1px solid var(--line); } .mr-auto { margin-right:auto; } .ml-auto { margin-left:auto; } .truncate { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .text-mutedInk { color:var(--muted-ink); } .tooltip-content { display:none; }
+.flex { display:flex; } .flex-col { flex-direction:column; } .flex-1 { flex:1; } .h-full { height:100%; } .min-h-0 { min-height:0; } .shrink-0 { flex-shrink:0; } .items-center { align-items:center; } .gap-2 { gap:8px; } .px-2 { padding-inline:8px; } .h-7 { min-height:28px; } .border-b { border-bottom:1px solid var(--line); } .mr-auto { margin-right:auto; } .ml-auto { margin-left:auto; } .truncate { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .text-mutedInk { color:var(--muted-ink); }

@@ -182,6 +182,15 @@ async function setup(options: { server?: Y.Doc; draft?: KicadDraft; readOnly?: b
   return { server, native, visibility, tick, container, host, saved: () => saved };
 }
 
+it("shows live tab counts including one tab and updates as peers leave", async () => {
+  const { container, tick } = await setup();
+  expect(container.querySelector(".connection-status")?.textContent).toBe("2 live tabs");
+  const sync = mock.sync.getMockImplementation()!;
+  mock.sync.mockImplementation(async request => ({ ...await sync(request), connectedSessions: 1 }));
+  await tick();
+  expect(container.querySelector(".connection-status")?.textContent).toBe("1 live tab");
+});
+
 it("syncs captured edits and remote updates while a hidden renderer RPC is suspended", async () => {
   const { server, native, visibility, tick, container } = await setup();
   const chrome = deferred();
